@@ -1,0 +1,330 @@
+<!doctype html>
+<meta charset="utf-8"/>
+<title>Remote PC Control — Панель</title>
+<link rel="stylesheet" href="/static/styles.css">
+
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">🖥️</div>
+    <div class="title">
+      <h1>Remote PC Control</h1>
+      <div class="subtitle">Панель управления агентами</div>
+    </div>
+  </div>
+  <div class="stats">
+    <div class="stat">
+      <span class="label">Онлайн</span>
+      <span class="value" id="count-online">0</span>
+    </div>
+    <div class="stat">
+      <span class="label">Всего</span>
+      <span class="value" id="count-total">0</span>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+  <section class="toolbar card">
+    <div class="left">
+      <form class="inline" onsubmit="return createGroup()">
+        <input id="gname" class="input" placeholder="Новая группа" required>
+        <button class="btn btn-primary">Создать</button>
+      </form>
+      <div class="divider"></div>
+      <input id="search" class="input" placeholder="Поиск по имени ПК…" oninput="setSearch(this.value)">
+      <label class="check">
+        <input type="checkbox" id="only-online" onchange="toggleOnlyOnline(this.checked)">
+        <span>Только онлайн</span>
+      </label>
+    </div>
+    <div class="right">
+      <button class="btn" onclick="loadAll()">Обновить</button>
+    </div>
+  </section>
+
+  <section class="grid">
+    <aside class="card sidebar">
+      <div class="card-title">Группы</div>
+      <ul id="groups" class="group-list"></ul>
+    </aside>
+
+    <section class="card content">
+      <div class="card-title">Компьютеры</div>
+      <table class="table" id="agents">
+        <thead>
+          <tr>
+            <th>Статус</th>
+            <th>Имя ПК</th>
+            <th>Группа</th>
+            <th class="actions">Действия</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <aside class="card info-panel">
+      <div class="card-title">Информация</div>
+      <!-- было: <pre id="info" class="info"></pre> -->
+      <div id="info" class="info info-view">
+        <div class="placeholder">Выберите компьютер, чтобы посмотреть подробности</div>
+      </div>
+      <div class="assign">
+        <label for="assign-group">Назначить группу:</label>
+        <select id="assign-group" class="input small"></select>
+        <button class="btn btn-primary small" onclick="assignGroup()">Назначить</button>
+        <button class="btn small" onclick="clearGroup()">Удалить из группы</button>
+      </div>
+    </aside>
+  </section>
+</main>
+
+<footer class="footer">
+  <div>© Remote PC Control • Локальная демонстрация</div>
+</footer>
+
+<script>
+const state = {
+  groups: [],
+  agents: [],
+  selectedGroupId: null,
+  search: "",
+  onlyOnline: false,
+  currentAgentId: null,
+};
+
+async function j(u,o){const r=await fetch(u,o); if(!r.ok) throw new Error(r.status); return r.json();}
+function esc(s){return (s??"").toString().replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+function g(id){return document.getElementById(id)}
+function N(v){return v===undefined||v===null?"":String(v)}
+
+function setSearch(v){ state.search = (v||"").toLowerCase(); renderAgents(); }
+function toggleOnlyOnline(v){ state.onlyOnline = !!v; renderAgents(); }
+
+function renderCounts(){
+  const total = state.agents.length;
+  const online = state.agents.filter(a=>a.online).length;
+  g("count-total").textContent = total;
+  g("count-online").textContent = online;
+}
+
+function renderGroups(){
+  const ul = g("groups"); ul.innerHTML = "";
+  const liAll = document.createElement("li");
+  liAll.className = "group-item" + (state.selectedGroupId===null ? " active" : "");
+  liAll.textContent = "Все компьютеры";
+  liAll.onclick = ()=>{ state.selectedGroupId = null; renderGroups(); renderAgents(); };
+  ul.appendChild(liAll);
+  for (const grp of state.groups){
+    const li = document.createElement("li");
+    li.className = "group-item" + (state.selectedGroupId===grp.id ? " active" : "");
+    li.textContent = grp.name;
+    li.title = `ID: ${grp.id}`;
+    li.onclick = ()=>{ state.selectedGroupId = grp.id; renderGroups(); renderAgents(); };
+    ul.appendChild(li);
+  }
+  const sel = g("assign-group");
+  sel.innerHTML = '<option value="">(нет)</option>' + state.groups.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join("");
+}
+
+function agentRow(a){
+  const dot = a.online ? '<span class="dot on" title="Онлайн"></span>' : '<span class="dot off" title="Оффлайн"></span>';
+  const name = esc(a.hostname)||a.agent_id;
+  const group = esc(a.group_name)||"-";
+  const viewBtn = a.online ? `<a class="btn btn-primary btn-sm" href="/view/${a.agent_id}">Подключиться</a>` : `<button class="btn btn-sm" disabled>Подключиться</button>`;
+  const unassignBtn = (a.group_id!=null)
+     ? `<button class="btn btn-sm" onclick="event.stopPropagation(); unassignAgent('${a.agent_id}')">Убрать из группы</button>`
+     : "";
+  return `<tr onclick="info('${a.agent_id}')" class="row-link">
+    <td class="status">${dot}</td>
+    <td class="host"><div class="host-name">${name}</div><div class="muted">${a.agent_id}</div></td>
+    <td class="group">${group}</td>
+    <td class="actions">
+      ${viewBtn}
+      <button class="btn btn-sm" onclick="event.stopPropagation(); info('${a.agent_id}')">Инфо</button>
+      ${unassignBtn}
+    </td>
+  </tr>`;
+}
+
+// Удаляем оффлайн-дубликаты, если есть онлайн с тем же именем ПК
+function dedupeByHostnamePreferOnline(list){
+  const map = new Map(); // host -> {hasOnline:boolean}
+  for (const a of list){
+    const key = (a.hostname||"").toLowerCase();
+    const cur = map.get(key) || {hasOnline:false};
+    if (a.online) cur.hasOnline = true;
+    map.set(key, cur);
+  }
+  return list.filter(a=>{
+    const key = (a.hostname||"").toLowerCase();
+    const hasOnline = map.get(key)?.hasOnline;
+    // если по этому hostname есть онлайн — скрываем оффлайн записи
+    return !(hasOnline && !a.online);
+  });
+}
+
+function renderAgents(){
+  let list = [...state.agents];
+  if (state.selectedGroupId !== null) list = list.filter(a=>a.group_id===state.selectedGroupId);
+  if (state.onlyOnline) list = list.filter(a=>a.online);
+  if (state.search){
+    const q = state.search;
+    list = list.filter(a=> (a.hostname||"").toLowerCase().includes(q) || (a.agent_id||"").toLowerCase().includes(q) || (a.group_name||"").toLowerCase().includes(q));
+  }
+  // скрываем оффлайн-дубликаты при наличии онлайн с тем же hostname
+  list = dedupeByHostnamePreferOnline(list);
+  list.sort((a,b)=> (b.online - a.online) || (a.hostname||"").localeCompare(b.hostname||""));
+  const tb = g("agents").querySelector("tbody");
+  tb.innerHTML = list.map(agentRow).join("");
+  renderCounts();
+  // если открыт info по текущему агенту — перерисовать (данные могли обновиться)
+  if (state.currentAgentId){
+    const a = state.agents.find(x=>x.agent_id===state.currentAgentId);
+    if (a) g("info").innerHTML = buildInfoHTML(a);
+  }
+}
+
+function pills(items){
+  const arr = Array.isArray(items) ? items : [];
+  if (!arr.length) return '<span class="muted">—</span>';
+  return `<div class="pills">${arr.map(x=>`<span class="pill">${esc(x)}</span>`).join("")}</div>`;
+}
+
+function kv(rows){
+  return `<dl class="kv">${rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${v||'<span class="muted">—</span>'}</dd>`).join("")}</dl>`;
+}
+
+function section(title, body){
+  return `<div class="section"><h4>${esc(title)}</h4>${body}</div>`;
+}
+
+function buildInfoHTML(a){
+  const info = a?.info || {};
+  const screen = info.screen || {};
+  const hw = info.hardware || {};
+  const cpu = hw.cpu || {};
+  const sys = hw.system_model || {};
+  const ip = N(info.ip);
+  const mac = N(info.mac);
+  const onlineBadge = a.online ? '<span class="chip chip-on">Онлайн</span>' : '<span class="chip">Оффлайн</span>';
+
+  const header = `
+    <div class="agent-header">
+      <div class="agent-title">
+        <div class="agent-name">${esc(a.hostname || a.agent_id)}</div>
+        <div class="agent-sub muted">${esc(a.agent_id)}</div>
+      </div>
+      <div class="agent-badges">
+        ${onlineBadge}
+        ${info.admin ? '<span class="chip chip-admin" title="Запущен с правами администратора">Admin</span>' : ''}
+      </div>
+    </div>
+  `;
+
+  const general = kv([
+    ["Имя ПК", esc(a.hostname||"")],
+    ["Пользователь", esc(info.user||"")],
+    ["ОС", esc(info.os||"")],
+    ["FQDN", esc(info.fqdn||"")],
+    ["Последняя активность", esc(a.last_seen||"")],
+  ]);
+
+  const network = kv([
+    ["Основной IP", ip ? `<span class="mono">${esc(ip)}</span>` : ""],
+    ["Все IP", pills(info.ips||[])],
+    ["Основной MAC", mac ? `<span class="mono">${esc(mac)}</span>` : ""],
+    ["Все MAC", pills(info.macs||[])],
+  ]);
+
+  const screenSec = kv([
+    ["Разрешение", (screen.width && screen.height) ? `<span class="mono">${screen.width} × ${screen.height}</span>` : ""],
+  ]);
+
+  const cpuLine = [
+    esc(cpu.model||""),
+    (cpu.cores_physical||cpu.cores_logical) ? `, ядра: ${cpu.cores_physical||"-"}/${cpu.cores_logical||"-"}` : "",
+    cpu.freq_mhz ? `, ${cpu.freq_mhz} МГц` : ""
+  ].join("");
+  const hardware = kv([
+    ["CPU", cpuLine || ""],
+    ["RAM", (hw.ram_gb ? `<span class="mono">${hw.ram_gb} ГБ</span>` : "")],
+    ["Архитектура", esc(hw.machine||"")],
+    ["Система", (sys.manufacturer||sys.product_name) ? esc(`${sys.manufacturer||""} ${sys.product_name||""}`.trim()) : ""],
+  ]);
+
+  return `
+    ${header}
+    ${section("Общее", general)}
+    ${section("Сеть", network)}
+    ${section("Экран", screenSec)}
+    ${section("Железо", hardware)}
+  `;
+}
+
+async function loadGroups(){
+  const data = await j("/api/groups");
+  state.groups = data.groups || [];
+  renderGroups();
+}
+
+async function loadAgents(){
+  const data = await j("/api/agents");
+  state.agents = data.agents || [];
+  renderAgents();
+}
+
+async function loadAll(){ await Promise.all([loadGroups(), loadAgents()]); }
+
+async function createGroup(){
+  const name = g("gname").value.trim();
+  if(!name) return false;
+  await j("/api/groups", {method:"POST", headers:{'Content-Type':'application/json'}, body: JSON.stringify({name})});
+  g("gname").value = "";
+  await loadGroups();
+  return false;
+}
+
+async function info(agent_id){
+  const a = state.agents.find(x=>x.agent_id===agent_id);
+  state.currentAgentId = agent_id;
+  g("info").innerHTML = a ? buildInfoHTML(a) : '<div class="placeholder">Нет данных</div>';
+  const sel = g("assign-group");
+  sel.value = (a && a.group_id!=null) ? String(a.group_id) : "";
+}
+
+async function assignGroup(){
+  const id = state.currentAgentId;
+  if(!id) return;
+  const val = g("assign-group").value;
+  const gid = val ? Number(val) : null;
+  await j(`/api/agents/${encodeURIComponent(id)}/assign_group`, {
+    method:"POST", headers:{'Content-Type':'application/json'}, body: JSON.stringify({group_id: gid})
+  });
+  await loadAgents();
+  info(id);
+}
+
+async function clearGroup(){
+  const id = state.currentAgentId;
+  if(!id) return;
+  await unassignAgent(id);
+}
+
+async function unassignAgent(agent_id){
+  await j(`/api/agents/${encodeURIComponent(agent_id)}/assign_group`, {
+    method:"POST",
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({group_id: null})
+  });
+  await loadAgents();
+  if (state.currentAgentId === agent_id){
+    const sel = g("assign-group");
+    if (sel) sel.value = "";
+    info(agent_id);
+  }
+}
+
+setInterval(loadAgents, 3000);
+loadAll();
+</script>

@@ -1,0 +1,324 @@
+<!doctype html>
+<meta charset="utf-8"/>
+<title>Просмотр {{AGENT_ID}}</title>
+<link rel="stylesheet" href="/static/styles.css">
+<div class="wrap">
+  <div class="viewer-topbar">
+    <a href="/" class="btn">← Назад</a>
+    <div class="grow"></div>
+    <button class="btn" id="btn-files" title="Передача файлов">📁 Файлы</button>
+  </div>
+
+  <div class="viewer">
+    <canvas id="cv" class="viewer-canvas"></canvas>
+  </div>
+</div>
+
+<!-- Модал для передачи файлов -->
+<div id="file-modal" class="modal hidden" aria-hidden="true">
+  <div class="modal__dialog">
+    <div class="modal__header">
+      <div class="modal__title">Передача файлов — Агент <code id="aid">{{AGENT_ID}}</code></div>
+      <button class="btn btn-icon" id="file-close" title="Закрыть">✕</button>
+    </div>
+    <div class="modal__body file-grid">
+      <section class="card file-remote">
+        <div class="card-title">Удалённый проводник</div>
+        <div class="p-12">
+          <div class="row gap">
+            <input id="remote-path" class="input" placeholder="Например: C:\\" style="flex:1 1 auto">
+            <button class="btn" id="btn-remote-open">Открыть</button>
+            <button class="btn" id="btn-remote-up">Вверх</button>
+          </div>
+          <div id="remote-list" class="file-list"></div>
+        </div>
+      </section>
+
+      <section class="card file-actions">
+        <div class="card-title">Действия</div>
+        <div class="p-12">
+          <div class="section">
+            <h4>Загрузить на удалённый ПК</h4>
+            <div class="row gap">
+              <input id="upload-dest" class="input" placeholder="Папка назначения (по умолчанию — текущая слева)" style="flex:1 1 auto">
+              <input id="upload-input" type="file" multiple style="display:none">
+              <button class="btn btn-primary" id="btn-upload-pick">Выбрать файлы…</button>
+            </div>
+            <div id="upload-progress" class="transfer-list"></div>
+          </div>
+
+          <div class="section">
+            <h4>Скачать с удалённого ПК</h4>
+            <div class="row gap">
+              <input id="download-path" class="input" placeholder="Путь к файлу на удалённом ПК" style="flex:1 1 auto">
+              <button class="btn" id="btn-download">Скачать</button>
+            </div>
+            <div id="download-progress" class="transfer-list"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script>
+const aid = "{{AGENT_ID}}";
+const ws = new WebSocket(`${location.protocol.replace("http","ws")}//${location.host}/ws/view/${encodeURIComponent(aid)}?token=view_dev_token`);
+ws.binaryType = "blob";
+
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d", {alpha:false});
+let lastDraw=0;
+
+// === Новое: метрики сети и окно просмотра ===
+let winBytes = 0, winFrames = 0;
+function send(obj){ if(ws.readyState===1){ ws.send(JSON.stringify(obj)); } }
+function sendViewerInfo(){
+  const rect = cv.parentElement.getBoundingClientRect();
+  send({type:"viewer_info", viewport: {w: Math.round(rect.width), h: Math.round(rect.height), dpr: window.devicePixelRatio || 1}});
+}
+window.addEventListener("resize", ()=>{ sendViewerInfo(); });
+
+// Пинги
+setInterval(()=>{ send({type:"net_ping", ts: Date.now()}); }, 5000);
+
+// Отправка статистики (каждые 2с)
+setInterval(()=>{
+  const seconds = 2;
+  const rx_bps = (winBytes * 8) / seconds;
+  const rx_fps = winFrames / seconds;
+  send({type:"viewer_stats", rx_bps, rx_fps});
+  winBytes = 0; winFrames = 0;
+}, 2000);
+
+ws.onopen = () => { sendViewerInfo(); };
+
+ws.onmessage = async ev => {
+  // Бинарные — это кадры экрана, строки — это управление/файлы/листинг
+  if (typeof ev.data !== "string") {
+    // Бинарный кадр
+    winBytes += ev.data.size || 0;
+    winFrames += 1;
+    
+    const now = performance.now();
+    if (now - lastDraw < 40) return;
+    lastDraw = now;
+    const bmp = await createImageBitmap(ev.data);
+    cv.width = bmp.width; cv.height = bmp.height;
+    ctx.drawImage(bmp, 0, 0);
+    return;
+  }
+  // Текстовые — протокол управления/файлы
+  try {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "net_pong") {
+      const rtt = Date.now() - Number(msg.ts || 0);
+      return;
+    }
+    handleAgentMessage(msg);
+    if (typeof handleAgentMessage === "function") handleAgentMessage(msg);
+  } catch {}
+};
+
+function send(obj){ if(ws.readyState===1){ ws.send(JSON.stringify(obj)); } }
+function relXY(e){ const r=cv.getBoundingClientRect(); const x=e.clientX-r.left; const y=e.clientY-r.top; return {x, y, w:r.width, h:r.height}; }
+cv.addEventListener("mousemove", e=>{ const p=relXY(e); send({type:"mouse", event:"move", ...p}); });
+cv.addEventListener("mousedown", e=>{ const p=relXY(e); send({type:"mouse", event:"down", button:e.button, ...p}); });
+cv.addEventListener("mouseup", e=>{ const p=relXY(e); send({type:"mouse", event:"up", button:e.button, ...p}); });
+cv.addEventListener("wheel", e=>{ const p=relXY(e); send({type:"mouse", event:"wheel", delta:e.deltaY, ...p}); e.preventDefault(); }, {passive:false});
+window.addEventListener("keydown", e=>{ send({type:"key", event:"down", key:e.key}); e.preventDefault(); });
+window.addEventListener("keyup", e=>{ send({type:"key", event:"up", key:e.key}); e.preventDefault(); });
+
+// ============ Файлы ============
+const modal = document.getElementById("file-modal");
+document.getElementById("btn-files").onclick = () => openFiles();
+document.getElementById("file-close").onclick = () => closeFiles();
+document.getElementById("btn-remote-open").onclick = () => openRemotePath();
+document.getElementById("btn-remote-up").onclick = () => goUp();
+document.getElementById("btn-upload-pick").onclick = () => document.getElementById("upload-input").click();
+document.getElementById("btn-download").onclick = () => startDownload();
+
+document.getElementById("upload-input").addEventListener("change", e => {
+  const files = Array.from(e.target.files || []);
+  if (!files.length) return;
+  const dest = document.getElementById("upload-dest").value.trim() || (remote.currentPath || "C:\\");
+  for (const f of files) startUpload(f, dest);
+  e.target.value = "";
+});
+
+const remote = { currentPath: "C:\\", items: [] };
+const transfers = new Map(); // transfer_id -> {name, size, sent/recv, chunks[]}
+
+function openFiles(){
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden","false");
+  document.getElementById("remote-path").value = remote.currentPath;
+  requestList(remote.currentPath);
+}
+function closeFiles(){
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden","true");
+}
+
+function requestList(path){
+  send({type:"file_list", path});
+}
+function openRemotePath(){
+  const p = document.getElementById("remote-path").value.trim();
+  if (p) requestList(p);
+}
+function goUp(){
+  let p = remote.currentPath || "";
+  if (!p) return;
+  // простая нормализация для Windows путей
+  p = p.replace(/[/\\]+$/,'');
+  const idx = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+  if (idx > 2) p = p.slice(0, idx);
+  else if (idx === 2) p = p.slice(0, idx+1);
+  document.getElementById("remote-path").value = p;
+  requestList(p);
+}
+
+function renderList(){
+  const box = document.getElementById("remote-list");
+  if (!Array.isArray(remote.items) || !remote.items.length){
+    box.innerHTML = '<div class="muted">Пусто</div>'; return;
+  }
+  box.innerHTML = remote.items.map(it => `
+    <div class="file-row ${it.is_dir?'dir':''}" data-path="${(remote.currentPath.endsWith("\\")?remote.currentPath:remote.currentPath+"\\") + it.name}">
+      <span class="ico">${it.is_dir?'📁':'📄'}</span>
+      <span class="name" title="${it.name}">${it.name}</span>
+      <span class="meta">${it.is_dir?'папка':(it.size||0)+' байт'}</span>
+      <button class="btn btn-sm ${it.is_dir?'':'btn-primary'} act" data-name="${it.name}">${it.is_dir?'Открыть':'Скачать'}</button>
+    </div>
+  `).join("");
+  box.querySelectorAll(".file-row .act").forEach(btn=>{
+    btn.addEventListener("click", (e)=>{
+      const row = e.target.closest(".file-row");
+      const full = row.dataset.path;
+      if (row.classList.contains("dir")){
+        document.getElementById("remote-path").value = full;
+        requestList(full);
+      } else {
+        document.getElementById("download-path").value = full;
+        startDownload();
+      }
+    });
+  });
+}
+
+function startUpload(file, destDir){
+  const transfer_id = crypto.randomUUID();
+  const entry = {name:file.name, size:file.size, sent:0};
+  transfers.set(transfer_id, entry);
+  addTransferUI("upload-progress", transfer_id, entry);
+
+  send({type:"file_upload_begin", transfer_id, name:file.name, size:file.size, dest_dir:destDir});
+
+  file.arrayBuffer().then(buf=>{
+    const chunkSize = 64*1024;
+    const u8 = new Uint8Array(buf);
+    let off = 0;
+    function b64from(u8slice){
+      let s=""; for(let i=0;i<u8slice.length;i++) s+=String.fromCharCode(u8slice[i]);
+      return btoa(s);
+    }
+    (function loop(){
+      if (off >= u8.length){
+        send({type:"file_upload_end", transfer_id});
+        return;
+      }
+      const end = Math.min(off+chunkSize, u8.length);
+      const chunk = u8.subarray(off, end);
+      off = end;
+      entry.sent = end;
+      updateTransferUI("upload-progress", transfer_id, entry);
+      send({type:"file_upload_chunk", transfer_id, data_b64: b64from(chunk)});
+      setTimeout(loop, 0);
+    })();
+  });
+}
+
+function startDownload(){
+  const path = document.getElementById("download-path").value.trim();
+  if (!path) return;
+  const name = path.split(/[\\/]/).pop() || "download.bin";
+  const transfer_id = crypto.randomUUID();
+  const entry = {name, size:0, recv:0, chunks:[]};
+  transfers.set(transfer_id, entry);
+  addTransferUI("download-progress", transfer_id, entry);
+  send({type:"file_download_begin", transfer_id, path});
+}
+
+function addTransferUI(containerId, tid, entry){
+  const box = document.getElementById(containerId);
+  const row = document.createElement("div");
+  row.className = "xfer-row";
+  row.id = `xfer-${tid}`;
+  row.innerHTML = `
+    <div class="xfer-name">${entry.name}</div>
+    <div class="xfer-bar"><div class="xfer-fill" style="width:0%"></div></div>
+    <div class="xfer-meta">0%</div>
+  `;
+  box.prepend(row);
+}
+function updateTransferUI(containerId, tid, entry){
+  const row = document.getElementById(`xfer-${tid}`); if(!row) return;
+  const meta = row.querySelector(".xfer-meta");
+  const fill = row.querySelector(".xfer-fill");
+  const total = entry.size || 1;
+  const done = entry.sent ?? entry.recv ?? 0;
+  const pct = Math.min(100, Math.round(done * 100 / total));
+  meta.textContent = `${pct}%`;
+  fill.style.width = `${pct}%`;
+}
+
+function handleAgentMessage(msg){
+  switch(msg.type){
+    case "file_list_result":
+      remote.currentPath = msg.path || remote.currentPath;
+      document.getElementById("remote-path").value = remote.currentPath;
+      remote.items = Array.isArray(msg.items)? msg.items : [];
+      renderList();
+      break;
+    case "file_error":
+      alert(msg.message || "Ошибка при работе с файлами");
+      break;
+    case "file_upload_ack":
+      // можно вывести всплывашку/лог
+      break;
+    case "file_upload_done": {
+      const t = transfers.get(msg.transfer_id); if(!t) break;
+      t.sent = t.size;
+      updateTransferUI("upload-progress", msg.transfer_id, t);
+      break;
+    }
+    case "file_download_meta": {
+      const t = transfers.get(msg.transfer_id); if(!t) break;
+      t.size = msg.size || 0;
+      updateTransferUI("download-progress", msg.transfer_id, t);
+      break;
+    }
+    case "file_download_chunk": {
+      const t = transfers.get(msg.transfer_id); if(!t) break;
+      const bstr = atob(msg.data_b64 || "");
+      const arr = new Uint8Array(bstr.length);
+      for (let i=0;i<bstr.length;i++) arr[i] = bstr.charCodeAt(i);
+      t.chunks.push(arr);
+      t.recv += arr.length;
+      updateTransferUI("download-progress", msg.transfer_id, t);
+      break;
+    }
+    case "file_download_end": {
+      const t = transfers.get(msg.transfer_id); if(!t) break;
+      const blob = new Blob(t.chunks, {type: "application/octet-stream"});
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = t.name || "download.bin";
+      a.click();
+      URL.revokeObjectURL(a.href);
+      break;
+    }
+  }
+}
+</script>

@@ -1,0 +1,4 @@
+websockets
+mss
+Pillow
+pyautogui
