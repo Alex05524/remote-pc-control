@@ -7,6 +7,7 @@ from typing import Tuple, List, Dict, Any, Optional
 from urllib.parse import urlparse, urlunparse
 import ssl
 import websockets
+from websockets import exceptions as ws_exceptions
 from PIL import Image
 import mss
 import pyautogui
@@ -758,6 +759,10 @@ def build_hello_payload(agent_id: str) -> Dict[str, Any]:
 
 async def connect_once(aid: str, uri: str) -> bool:
     try:
+        u = urlparse(uri)
+        if (u.hostname in ("127.0.0.1", "localhost", "::1")):
+            logging.warning("AGENT_SERVER указывает на loopback (%s). Для удалённого ПК задайте IP сервера в сети.", u.hostname)
+
         ssl_ctx = _ssl_context_for(uri)
         async with websockets.connect(
             uri,
@@ -775,37 +780,24 @@ async def connect_once(aid: str, uri: str) -> bool:
             if resp != "OK":
                 logging.warning("handshake resp: %s", resp)
                 return False
+            logging.info("handshake OK")
 
-            # HTML-сводка (опционально)
-            try:
-                html = (
-                    f"<div><strong>{hello.get('host','')}</strong> • {hello.get('os','')}</div>"
-                    f"<div>IP: {hello.get('ip','')} • MAC: {hello.get('mac','')}</div>"
-                )
-                await ws.send(json.dumps({"type":"hello_view","format":"html","data": html}, ensure_ascii=False))
-            except Exception:
-                pass
+            await ws.wait_closed()
+            logging.info("ws closed: code=%s reason=%s", getattr(ws,"close_code",None), getattr(ws,"close_reason",""))
+            return False
 
-            # Инициализация адаптера
-            w = int((hello.get("screen") or {}).get("width") or 0) or screen_size()[0]
-            h = int((hello.get("screen") or {}).get("height") or 0) or screen_size()[1]
-            cfg = AdaptiveConfig(screen_w=w, screen_h=h)
-            cfg.on_input()  # стартовое время активности
-
-            print(f"[agent] streaming {w}x{h} to {uri}")
-
-            # Параллельно: поток кадров и обработка команд
-            stream_task = asyncio.create_task(stream_frames(ws, cfg))
-            try:
-                await handle_inputs(ws, cfg)
-            finally:
-                stream_task.cancel()
-                try:
-                    await stream_task
-                except Exception:
-                    pass
-        return True
-    except Exception as e:
+    except ws_exceptions.InvalidMessage:
+        # Сервер, вероятно, слушает wss, а мы пришли по ws — переключаемся
+        if uri.startswith("ws://"):
+            alt = "wss://" + uri[len("ws://"):]
+            logging.warning("InvalidMessage на %s; пробуем %s", uri, alt)
+            return await connect_once(aid, alt)
+        logging.exception("connect_once error")
+        return False
+    except ssl.SSLCertVerificationError:
+        logging.error("TLS verify failed. Установите AGENT_TLS_INSECURE=1 или укажите AGENT_CA_FILE")
+        return False
+    except Exception:
         logging.exception("connect_once error")
         return False
 

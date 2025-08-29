@@ -1,12 +1,12 @@
 import sqlite3, json
-import os
+import os, socket
 import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, List, Set, Tuple
 from fastapi.responses import HTMLResponse, PlainTextResponse
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Query
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -17,19 +17,25 @@ APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web"
 DB_PATH = APP_DIR / "server.sqlite3"
 
+# Гарантируем наличие health для проверки
+try:
+    from fastapi import FastAPI
+except NameError:
+    app = FastAPI()
+
 # === Вшитая защита (можно сменить значения) ===
 SHARED_SECRET = os.environ.get("SHARED_SECRET", "rpcs_dev_secret_change_me")
-app = FastAPI()
+
+# Инициализируем FastAPI один раз
+app = FastAPI(title="Remote PC Control (Stream)")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
 # общий секрет для HMAC (агент <-> сервер)
 VIEWER_TOKEN  = "view_dev_token"                  # токен для WebSocket зрителя (браузер)
 AUTH_TS_SKEW  = int(os.environ.get("AUTH_TS_SKEW", "-1")) # допуск по времени (сек)
 NONCE_TTL     = int(os.environ.get("NONCE_TTL", "180")) # время жизни nonce (сек)
 _auth_nonces: Dict[str, float] = {}               # nonce -> ts
-
-app = FastAPI(title="Remote PC Control (Stream)")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
-app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
 # Онлайн-реестр: агенты и их зрители
 active_agents: Dict[str, Dict[str, Any]] = {}   # agent_id -> {"ws": WebSocket, "info": dict}
@@ -351,14 +357,46 @@ async def ws_view(ws: WebSocket, agent_id: str):
         except Exception: pass
 
 @app.get("/bootstrap.ps1")
-def bootstrap_ps1(request: Request):
-    host = request.headers.get("host") or f"127.0.0.1:{os.environ.get('PORT','8765')}"
+def bootstrap_ps1(
+    request: Request,
+    host: str | None = Query(default=None, description="IP или хост сервера, например 192.168.1.50"),
+    port: int | None = Query(default=None, description="Порт сервера, по умолчанию 8765"),
+    insecure: int | None = Query(default=None, description="1 — не проверять TLS (dev)")
+):
+    # определяем host: сначала из параметра ?host=, затем из заголовка Host, иначе берём локальный IP
+    req_host = host or (request.headers.get("host") or "")
+    # вытащим только хост без порта, если пришёл host:port
+    if ":" in req_host:
+        h, _, p = req_host.rpartition(":")
+        try:
+            # если host был вида [::1]:8765
+            if h.startswith("[") and h.endswith("]"):
+                h = h[1:-1]
+        except Exception:
+            pass
+        req_host = h
+        if not port:
+            try: port = int(p)
+            except Exception: pass
+    if not req_host:
+        try:
+            req_host = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            req_host = "127.0.0.1"
+
+    if not port:
+        try:
+            port = int(str(request.url.port or "8765"))
+        except Exception:
+            port = 8765
+
     ssl_on = bool(os.environ.get("SSL_CERTFILE") and os.environ.get("SSL_KEYFILE"))
     http_scheme = "https" if ssl_on else "http"
     ws_scheme = "wss" if ssl_on else "ws"
-    ws_uri = f"{ws_scheme}://{host}/ws/agent"
-    download_url = f"{http_scheme}://{host}/static/agent/rpc-agent.exe"
+    ws_uri = f"{ws_scheme}://{req_host}:{port}/ws/agent"
+    download_url = f"{http_scheme}://{req_host}:{port}/static/agent/rpc-agent.exe"
     secret = os.environ.get("SHARED_SECRET", "rpcs_dev_secret_change_me")
+    tls_insecure = insecure if insecure is not None else (1 if ssl_on else 0)
 
     ps = f"""$ErrorActionPreference = "Stop"
 $dir = Join-Path $env:LOCALAPPDATA "RPC-Agent"
@@ -371,23 +409,17 @@ Invoke-WebRequest -Uri "{download_url}" -OutFile $exe
 Write-Host "Настраиваю переменные окружения..." -ForegroundColor Cyan
 setx SHARED_SECRET "{secret}" | Out-Null
 setx AGENT_SERVER "{ws_uri}" | Out-Null
-{"setx AGENT_TLS_INSECURE \"1\" | Out-Null" if ssl_on else ""}
+{"setx AGENT_TLS_INSECURE \"1\" | Out-Null" if tls_insecure else ""}
 
 Write-Host "Запускаю агента..." -ForegroundColor Cyan
 Start-Process -FilePath $exe
-Write-Host "Готово. Агент запущен." -ForegroundColor Green
+Write-Host "Готово. Агент запущен и подключится к {ws_uri}." -ForegroundColor Green
 """
     return PlainTextResponse(ps, media_type="text/plain; charset=utf-8")
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    ssl_cert = os.environ.get("SSL_CERTFILE") or None
-    ssl_key  = os.environ.get("SSL_KEYFILE") or None
-    uvicorn.run(
-        "app:app",
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", "8765")),
-        ssl_certfile=ssl_cert,
-        ssl_keyfile=ssl_key
-    )
+    port = int(os.environ.get("PORT", "8765"))
+    cert = os.environ.get("SSL_CERTFILE") or None
+    key  = os.environ.get("SSL_KEYFILE") or None
+    uvicorn.run("app:app", host="0.0.0.0", port=port, ssl_certfile=cert, ssl_keyfile=key)
                 

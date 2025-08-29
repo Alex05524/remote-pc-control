@@ -5,16 +5,20 @@ $env:ALLOW_PUBLIC_AGENTS = "1"
 $env:SHARED_SECRET = "rpcs_dev_secret_change_me"
 $env:AUTH_TS_SKEW = "-1"
 
-# Опционально TLS (если cert.pem/key.pem присутствуют в папке server)
+# TLS, если есть cert.pem/key.pem
 if ((Test-Path -LiteralPath ".\cert.pem" -PathType Leaf) -and (Test-Path -LiteralPath ".\key.pem" -PathType Leaf)) {
   $env:SSL_CERTFILE = (Resolve-Path ".\cert.pem")
   $env:SSL_KEYFILE  = (Resolve-Path ".\key.pem")
 }
 
-# Подготовим веб-папку для скачивания агента
+# Фаервол: открыть порт на всех профилях
+if (-not (Get-NetFirewallRule -DisplayName "RPC Server 8765" -ErrorAction SilentlyContinue)) {
+  New-NetFirewallRule -DisplayName "RPC Server 8765" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8765 -Profile Any | Out-Null
+}
+
+# Папка для раздачи агента
 $webAgentDir = Join-Path (Get-Location) "web\agent"
 if (-not (Test-Path $webAgentDir)) { New-Item -ItemType Directory -Force -Path $webAgentDir | Out-Null }
-# Если есть собранный exe в ..\dist\rpc-agent.exe — скопируем
 $repoRoot = Resolve-Path "$PSScriptRoot\.."
 $builtExe = Join-Path $repoRoot "dist\rpc-agent.exe"
 $pubExe   = Join-Path $webAgentDir "rpc-agent.exe"
@@ -34,8 +38,13 @@ try {
 
 Write-Host "Откройте на клиентском ПК PowerShell и выполните:" -ForegroundColor Yellow
 foreach ($ip in $ips) {
-  Write-Host ("  iwr {0}://{1}:{2}/bootstrap.ps1 -UseBasicParsing | iex" -f $scheme, $ip, $port) -ForegroundColor Cyan
+  Write-Host ("  iwr ""{0}://{1}:{2}/bootstrap.ps1?host={1}&port={2}"" -UseBasicParsing | iex" -f $scheme, $ip, $port) -ForegroundColor Cyan
 }
-Write-Host ("Либо в браузере скачайте: {0}://<IP>:{1}/bootstrap.ps1" -f $scheme, $port) -ForegroundColor Yellow
+Write-Host ("Проверка здоровья: {0}://<IP>:{1}/health" -f $scheme, $port) -ForegroundColor Yellow
 
-python .\app.py
+# ЯВНО слушаем на всех интерфейсах через uvicorn
+$uvicornArgs = @("app:app","--host","0.0.0.0","--port","$port")
+if ($env:SSL_CERTFILE -and $env:SSL_KEYFILE) {
+  $uvicornArgs += @("--ssl-certfile","$env:SSL_CERTFILE","--ssl-keyfile","$env:SSL_KEYFILE")
+}
+python -m uvicorn @uvicornArgs
