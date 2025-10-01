@@ -691,12 +691,20 @@ def offline():
         return HTMLResponse("<h1>Offline</h1><p>No offline.html</p>")
     return HTMLResponse(page.read_text(encoding="utf-8"))
 
+@app.get("/", response_class=HTMLResponse)
+def index():
+    index_file = WEB_DIR / "index.html"
+    if not index_file.exists():
+        return HTMLResponse("<h1>Remote PC Control</h1><p>No index.html</p>")
+    return HTMLResponse(index_file.read_text(encoding="utf-8"))
+
+@app.head("/")
+def head_root():
+    return PlainTextResponse("", status_code=200)
+
 # ================== Точка входа ==================
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8765"))
-    cert = os.environ.get("SSL_CERTFILE") or None
-    key = os.environ.get("SSL_KEYFILE") or None
-    logger.info("Starting uvicorn on 0.0.0.0:%s SSL=%s", port, bool(cert and key))
-    import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=port, ssl_certfile=cert, ssl_keyfile=key)
+    import uvicorn, os
+    uvicorn.run("server.app:app", host="0.0.0.0",
+                port=int(os.environ.get("PORT","8765")))

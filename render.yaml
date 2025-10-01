@@ -6,16 +6,15 @@ services:
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: uvicorn server.app:app --host 0.0.0.0 --port $PORT
     autoDeploy: true
+    healthCheckPath: /health
     envVars:
       - key: VIEWER_TOKEN
-        sync: false          # задайте в панели Render
+        sync: false
       - key: SHARED_SECRET
-        sync: false          # задайте в панели Render
+        sync: false
       - key: LOG_LEVEL
         value: INFO
       - key: AGENT_FULL_FS
         value: "1"
       - key: CORS_ORIGINS
         value: "*"
-    healthCheckPath: /health
-    runtime: python
