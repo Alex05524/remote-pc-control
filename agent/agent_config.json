@@ -1,3 +1,23 @@
 {
-  "agent_id": "422287f4-0b7f-495d-a614-6f380c1a3efd"
+  "agent_id": "422287f4-0b7f-495d-a614-6f380c1a3efd",
+  "server_uri": "ws://127.0.0.1:8765/ws/agent",
+  "server_uris": [
+    "ws://127.0.0.1:8765/ws/agent",
+    "wss://relay.example.com/ws/agent"
+  ],
+  "shared_secret": "rpcs_dev_secret_change_me",
+  "tls": {
+    "insecure": false,
+    "ca_file": "",
+    "client_cert": "",
+    "client_key": ""
+  },
+  "uploads": {
+    "default_dir": "",
+    "idle_timeout": 120
+  },
+  "logging": {
+    "level": "INFO",
+    "dir": ""
+  }
 }

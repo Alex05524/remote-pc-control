@@ -15,37 +15,74 @@
 </div>
 
 <!-- Модал для передачи файлов -->
-<div id="file-modal" class="modal hidden" aria-hidden="true">
-  <div class="modal__dialog">
+<div id="preview-modal" class="modal hidden" aria-hidden="true">
+  <div class="modal__dialog" style="max-width:720px">
     <div class="modal__header">
-      <div class="modal__title">Передача файлов — Агент <code id="aid">{{AGENT_ID}}</code></div>
-      <button class="btn btn-icon" id="file-close" title="Закрыть">✕</button>
+      <div class="modal__title" id="preview-title">Предпросмотр</div>
+      <button class="btn btn-icon" id="preview-close">✕</button>
     </div>
+    <div class="modal__body" id="preview-body" style="max-height:70vh;overflow:auto;font-family:ui-monospace,consolas,monospace;font-size:13px;white-space:pre-wrap;"></div>
+  </div>
+</div>
     <div class="modal__body file-grid">
       <section class="card file-remote">
-        <div class="card-title">Удалённый проводник</div>
+        <div class="card-title">Удалённая система</div>
         <div class="p-12">
-          <div class="row gap">
-            <input id="remote-path" class="input" placeholder="Например: C:\\" style="flex:1 1 auto">
-            <button class="btn" id="btn-remote-open">Открыть</button>
-            <button class="btn" id="btn-remote-up">Вверх</button>
+          <div class="file-toolbar">
+            <button class="btn btn-sm" id="btn-back" title="Назад">←</button>
+            <button class="btn btn-sm" id="btn-forward" title="Вперёд">→</button>
+            <select id="drive-select" class="input input-sm"></select>
+            <div id="breadcrumbs" class="breadcrumbs"></div>
+            <div class="grow"></div>
+            <input id="search-input" class="input input-sm" placeholder="Поиск..." style="width:140px">
+            <button class="btn btn-sm" id="btn-search">🔍</button>
+            <button class="btn btn-sm" id="btn-copy" disabled>⧉</button>
+            <button class="btn btn-sm" id="btn-cut" disabled>✂</button>
+            <button class="btn btn-sm" id="btn-paste" disabled>📋</button>
+            <button class="btn btn-sm" id="btn-zip" disabled title="Скачать ZIP">🗜</button>
+            <button class="btn btn-sm" id="btn-refresh">⟳</button>
+            <button class="btn btn-sm" id="btn-new-folder">+Папка</button>
+            <button class="btn btn-sm" id="btn-delete" disabled>🗑</button>
           </div>
-          <div id="remote-list" class="file-list"></div>
+          <div class="file-panel">
+            <div class="file-head">
+              <label class="chk-col">
+                <input type="checkbox" id="sel-all">
+              </label>
+              <button class="hcol" data-sort="name">Имя</button>
+              <button class="hcol col-size" data-sort="size">Размер</button>
+              <button class="hcol col-type" data-sort="ext">Тип</button>
+              <button class="hcol col-mtime" data-sort="mtime">Изм.</button>
+            </div>
+            <div id="file-list" class="file-body"></div>
+          </div>
+          <div class="upload-bar">
+            <input id="upload-input" type="file" multiple style="display:none">
+            <button class="btn btn-primary btn-sm" id="btn-upload">Загрузить…</button>
+            <span id="path-display" class="muted mono"></span>
+          </div>
+          <div id="transfer-area" class="transfer-area"></div>
         </div>
       </section>
 
       <section class="card file-actions">
         <div class="card-title">Действия</div>
-        <div class="p-12">
-          <div class="section">
-            <h4>Загрузить на удалённый ПК</h4>
-            <div class="row gap">
-              <input id="upload-dest" class="input" placeholder="Папка назначения (по умолчанию — текущая слева)" style="flex:1 1 auto">
-              <input id="upload-input" type="file" multiple style="display:none">
-              <button class="btn btn-primary" id="btn-upload-pick">Выбрать файлы…</button>
-            </div>
-            <div id="upload-progress" class="transfer-list"></div>
-          </div>
+        <div class="p-12 small">
+          <p><b>Клики:</b> двойной — открыть / скачать файл, Enter — открыть, Backspace — вверх.</p>
+          <p><b>Контекст (ПКМ / долгое касание):</b> открыть / скачать, переименовать, удалить.</p>
+          <p><b>Горячие клавиши:</b> F2 — переименовать, Del — удалить, Ctrl+C / Ctrl+V (зарезервировано под копирование — реализуем позже).</p>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<ul id="ctx-menu" class="ctx hidden">
+  <li data-act="open">Открыть</li>
+  <li data-act="download">Скачать</li>
+  <li data-act="rename">Переименовать</li>
+  <li data-act="delete" class="danger">Удалить</li>
+</ul>
 
           <div class="section">
             <h4>Скачать с удалённого ПК</h4>
@@ -271,6 +308,573 @@ function updateTransferUI(containerId, tid, entry){
   const pct = Math.min(100, Math.round(done * 100 / total));
   meta.textContent = `${pct}%`;
   fill.style.width = `${pct}%`;
+}
+
+FM.history = [];
+FM.historyIndex = -1;
+FM.clipboard = null; // {op:"copy"|"move", paths:[]}
+
+// Навигация с историей
+function pushHistory(path){
+  if(FM.historyIndex >=0 && FM.history[FM.historyIndex] === path) return;
+  FM.history = FM.history.slice(0, FM.historyIndex+1);
+  FM.history.push(path);
+  FM.historyIndex = FM.history.length-1;
+  updateHistoryButtons();
+}
+function goBack(){
+  if(FM.historyIndex > 0){
+    FM.historyIndex--;
+    listPath(FM.history[FM.historyIndex], {noHistory:true});
+  }
+  updateHistoryButtons();
+}
+function goForward(){
+  if(FM.historyIndex < FM.history.length-1){
+    FM.historyIndex++;
+    listPath(FM.history[FM.historyIndex], {noHistory:true});
+  }
+  updateHistoryButtons();
+}
+function updateHistoryButtons(){
+  document.getElementById("btn-back").disabled = FM.historyIndex <= 0;
+  document.getElementById("btn-forward").disabled = FM.historyIndex >= FM.history.length-1;
+}
+
+// Переопределяем listPath чтобы писать историю
+const _origListPath = listPath;
+listPath = function(path, opts={}){
+  _origListPath(path);
+  if(!opts.noHistory && path) pushHistory(path);
+};
+
+// Копирование / Вырезание / Вставка
+function doCopy(op){
+  if(!FM.selection.size) return;
+  FM.clipboard = {op, paths:[...FM.selection]};
+  updateClipboardButtons();
+}
+function doPaste(){
+  if(!FM.clipboard) return;
+  send({type:"file_paste", dest: FM.currentPath, entries: FM.clipboard.paths.map(p=>({src:p, op:FM.clipboard.op==="cut"?"move":"copy"}))});
+}
+function updateClipboardButtons(){
+  document.getElementById("btn-paste").disabled = !FM.clipboard;
+}
+
+function startZipDownload(){
+  if(!FM.selection.size) return;
+  const transfer_id = crypto.randomUUID();
+  send({type:"file_zip_download", paths:[...FM.selection], transfer_id});
+}
+
+// Превью
+const previewModal = document.getElementById("preview-modal");
+const previewBody = document.getElementById("preview-body");
+const previewTitle = document.getElementById("preview-title");
+document.getElementById("preview-close").onclick = ()=>closePreview();
+function openPreview(path){
+  send({type:"file_preview", path});
+}
+function showPreviewText(path, text){
+  previewTitle.textContent = "Предпросмотр: " + path;
+  previewBody.innerHTML = "";
+  const pre=document.createElement("pre");
+  pre.textContent = text;
+  previewBody.appendChild(pre);
+  previewModal.classList.remove("hidden");
+}
+function showPreviewImage(path, data_b64, mime){
+  previewTitle.textContent = "Изображение: " + path;
+  previewBody.innerHTML = `<img style="max-width:100%;height:auto;display:block" src="data:${mime};base64,${data_b64}">`;
+  previewModal.classList.remove("hidden");
+}
+function closePreview(){
+  previewModal.classList.add("hidden");
+}
+
+// Поиск
+document.getElementById("btn-search").onclick = ()=> startSearch();
+document.getElementById("search-input").addEventListener("keydown", e=>{ if(e.key==="Enter") startSearch(); });
+function startSearch(){
+  const q = document.getElementById("search-input").value.trim();
+  if(!q) return;
+  send({type:"file_search", path:FM.currentPath, query:q, depth:4, max:600});
+}
+
+// Кнопки
+document.getElementById("btn-back").onclick = goBack;
+document.getElementById("btn-forward").onclick = goForward;
+document.getElementById("btn-copy").onclick = ()=>doCopy("copy");
+document.getElementById("btn-cut").onclick = ()=>doCopy("cut");
+document.getElementById("btn-paste").onclick = ()=>doPaste();
+document.getElementById("btn-zip").onclick = ()=>startZipDownload();
+
+// Адаптируем updateButtons
+const _oldUpdateButtons = updateButtons;
+updateButtons = function(){
+  _oldUpdateButtons();
+  const hasSel = FM.selection.size>0;
+  document.getElementById("btn-copy").disabled = !hasSel;
+  document.getElementById("btn-cut").disabled = !hasSel;
+  document.getElementById("btn-zip").disabled = !hasSel;
+  updateClipboardButtons();
+};
+
+// Контекстное меню: добавим пункты "Копировать", "Вырезать", "Превью"
+(function augmentCtx(){
+  const ctx = document.getElementById("ctx-menu");
+  if(!ctx) return;
+  if(!ctx.querySelector('[data-act="copy"]')){
+    ctx.innerHTML = ctx.innerHTML.replace('</ul>','') +
+      '<li data-act="copy">Копировать</li>'+
+      '<li data-act="cut">Вырезать</li>'+
+      '<li data-act="preview">Превью</li></ul>';
+  }
+  ctx.addEventListener("click", e=>{
+    const act = e.target.dataset.act;
+    if(!act) return;
+    if(act==="copy"){ doCopy("copy"); }
+    else if(act==="cut"){ doCopy("cut"); }
+    else if(act==="preview"){ if(FM.selection.size===1) openPreview([...FM.selection][0]); }
+  });
+})();
+
+/* ============ Новый файловый менеджер ============ */
+const FM = {
+  drives: [],
+  currentPath: "",
+  items: [],
+  sort: { field:"name", dir:1 },
+  selection: new Set(),
+  editing: null,
+  transfers: new Map()
+};
+
+const elDrive = document.getElementById("drive-select");
+const elList = document.getElementById("file-list");
+const elCrumbs = document.getElementById("breadcrumbs");
+const elSelAll = document.getElementById("sel-all");
+const elBtnRefresh = document.getElementById("btn-refresh");
+const elBtnNewFolder = document.getElementById("btn-new-folder");
+const elBtnDelete = document.getElementById("btn-delete");
+const elUploadBtn = document.getElementById("btn-upload");
+const elUploadInput = document.getElementById("upload-input");
+const elTransferArea = document.getElementById("transfer-area");
+const elPathDisplay = document.getElementById("path-display");
+const ctxMenu = document.getElementById("ctx-menu");
+
+function fmSend(o){ send(o); }
+
+function loadDrives(){ fmSend({type:"file_drives"}); }
+function listPath(path){
+  fmSend({type:"file_list_adv", path});
+}
+
+function normalizePath(p){
+  if(!p) return "";
+  p = p.replace(/\\/g,"\\");
+  return p;
+}
+
+function renderDrives(){
+  elDrive.innerHTML = FM.drives.map(d=>`<option value="${d.path}">${d.label||d.path}</option>`).join("");
+  if(FM.currentPath){
+    const drv = FM.drives.find(d=>FM.currentPath.toUpperCase().startsWith(d.path.toUpperCase()));
+    if(drv) elDrive.value = drv.path;
+  }
+}
+
+function buildBreadcrumbs(){
+  elCrumbs.innerHTML = "";
+  if(!FM.currentPath){ return; }
+  const parts = FM.currentPath.replace(/\\/g,"\\").split(/\\+/);
+  let accum = "";
+  const frag = [];
+  for(let i=0;i<parts.length;i++){
+    let part = parts[i];
+    if(part === "") continue;
+    if(accum === "") accum = part.endsWith(":") ? part+"\\" : part;
+    else accum = accum.endsWith("\\") ? accum+part : accum+"\\"+part;
+    const idx = i;
+    frag.push(`<span class="crumb" data-path="${accum}">${part}</span>`);
+    if(i !== parts.length-1) frag.push(`<span class="sep">/</span>`);
+  }
+  elCrumbs.innerHTML = frag.join("");
+  elCrumbs.querySelectorAll(".crumb").forEach(c=>{
+    c.onclick = () => {
+      listPath(c.dataset.path);
+    };
+  });
+  elPathDisplay.textContent = FM.currentPath;
+}
+
+function fmtSize(x){
+  if(x == null || x === 0) return "";
+  const u = ["B","KB","MB","GB","TB"];
+  let i=0, v = x;
+  while(v>=1024 && i<u.length-1){ v/=1024; i++; }
+  return (v<10? v.toFixed(1):Math.round(v))+" "+u[i];
+}
+function fmtMTime(ts){
+  if(!ts) return "";
+  try{
+    const d = new Date(ts*1000);
+    return d.toLocaleDateString()+" "+d.toLocaleTimeString().slice(0,5);
+  }catch{return "";}
+}
+
+function sortItems(){
+  const f = FM.sort.field;
+  const dir = FM.sort.dir;
+  FM.items.sort((a,b)=>{
+    if(a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1; // папки вверх
+    let va = a[f], vb = b[f];
+    if(f==="name"||f==="ext") {
+      va = (va||"").toLowerCase(); vb = (vb||"").toLowerCase();
+    } else {
+      va = va ?? 0; vb = vb ?? 0;
+    }
+    if(va<vb) return -1*dir;
+    if(va>vb) return 1*dir;
+    return 0;
+  });
+}
+
+function renderList(){
+  sortItems();
+  elList.innerHTML = FM.items.map(it=>{
+    const sel = FM.selection.has(it.full_path) ? " sel":"";
+    return `<div class="f-row${sel}" data-path="${it.full_path}">
+      <div class="chk"><input type="checkbox" class="row-chk" data-path="${it.full_path}" ${sel?"checked":""}></div>
+      <div class="f-name">
+        <div class="f-ico">${it.is_dir?"📁":"📄"}</div>
+        <span class="txt" data-name>${it.name}</span>
+      </div>
+      <div class="col-size mono">${it.is_dir?"":fmtSize(it.size)}</div>
+      <div class="col-type">${it.is_dir?"Папка":(it.ext||"")}</div>
+      <div class="col-mtime mono">${fmtMTime(it.mtime)}</div>
+    </div>`;
+  }).join("");
+  updateButtons();
+  bindListEvents();
+}
+
+function bindListEvents(){
+  elList.querySelectorAll(".f-row").forEach(row=>{
+    const path = row.dataset.path;
+    row.ondblclick = () => openItem(path);
+    row.oncontextmenu = (e)=>{
+      e.preventDefault();
+      showCtx(e.clientX,e.clientY,path);
+    };
+    row.onclick = (e)=>{
+      if(e.target.classList.contains("row-chk")) return;
+      if(e.shiftKey){
+        // диапазон
+        const rows = [...elList.querySelectorAll(".f-row")];
+        const idxA = rows.findIndex(r=>FM.selection.has(r.dataset.path));
+        const idxB = rows.findIndex(r=>r===row);
+        if(idxA>=0){
+          const [s,e2] = [idxA,idxB].sort((x,y)=>x-y);
+          for(let i=s;i<=e2;i++) FM.selection.add(rows[i].dataset.path);
+        } else {
+          FM.selection.add(path);
+        }
+      } else if(e.ctrlKey || e.metaKey){
+        if(FM.selection.has(path)) FM.selection.delete(path); else FM.selection.add(path);
+      } else {
+        FM.selection.clear();
+        FM.selection.add(path);
+      }
+      renderList();
+    };
+  });
+  elList.querySelectorAll(".row-chk").forEach(ch=>{
+    ch.onchange = ()=>{
+      const p=ch.dataset.path;
+      if(ch.checked) FM.selection.add(p); else FM.selection.delete(p);
+      updateButtons();
+    };
+  });
+}
+
+function updateButtons(){
+  elBtnDelete.disabled = FM.selection.size === 0;
+  elSelAll.checked = FM.items.length>0 && FM.items.every(i=>FM.selection.has(i.full_path));
+}
+
+function openItem(full){
+  const obj = FM.items.find(x=>x.full_path===full);
+  if(!obj) return;
+  if(obj.is_dir){
+    listPath(full);
+  } else {
+    // скачивание
+    startDownload(full);
+  }
+}
+
+function showCtx(x,y,path){
+  ctxMenu.style.left = x+"px";
+  ctxMenu.style.top = y+"px";
+  ctxMenu.classList.remove("hidden");
+  ctxMenu.dataset.path = path;
+}
+
+document.addEventListener("click", (e)=>{
+  if(!ctxMenu.contains(e.target)) ctxMenu.classList.add("hidden");
+});
+
+ctxMenu.addEventListener("click", (e)=>{
+  const act = e.target.dataset.act;
+  if(!act) return;
+  const p = ctxMenu.dataset.path;
+  ctxMenu.classList.add("hidden");
+  if(!FM.selection.has(p)){
+    FM.selection.clear(); FM.selection.add(p);
+  }
+  switch(act){
+    case "open": openItem(p); break;
+    case "download": FM.selection.forEach(f=>startDownload(f)); break;
+    case "rename": startRename(p); break;
+    case "delete": confirmDelete(); break;
+  }
+});
+
+function startRename(path){
+  if(FM.editing) return;
+  const row = elList.querySelector(`.f-row[data-path="${CSS.escape(path)}"]`);
+  if(!row) return;
+  const span = row.querySelector('[data-name]');
+  const old = span.textContent;
+  FM.editing = path;
+  row.classList.add("editing");
+  span.innerHTML = `<input class="inline-edit" value="${old}">`;
+  const input = span.querySelector("input");
+  input.focus();
+  input.select();
+  input.onkeydown = (e)=>{
+    if(e.key==="Enter") { finishRename(path, input.value.trim()); }
+    else if(e.key==="Escape"){ cancelRename(); }
+  };
+  input.onblur = ()=> cancelRename();
+}
+
+function finishRename(path, newName){
+  if(!newName){ cancelRename(); return; }
+  const dir = path.replace(/[\\/]+$/,'').replace(/[/\\][^/\\]+$/,'') || path;
+  fmSend({type:"file_rename", path, new_name:newName});
+  FM.editing = null;
+}
+
+function cancelRename(){
+  FM.editing = null;
+  listPath(FM.currentPath);
+}
+
+function confirmDelete(){
+  if(!FM.selection.size) return;
+  if(!confirm(`Удалить ${FM.selection.size} объект(ов)?`)) return;
+  fmSend({type:"file_delete", paths:[...FM.selection]});
+}
+
+function createFolder(){
+  const base = FM.currentPath || "";
+  const name = prompt("Имя новой папки:","NewFolder");
+  if(!name) return;
+  fmSend({type:"file_mkdir", path: base, name});
+}
+
+function startDownload(full){
+  const name = full.split(/[\\/]/).pop() || "download.bin";
+  const transfer_id = crypto.randomUUID();
+  const entry = { id:transfer_id, name, size:0, recv:0, chunks:[], type:"download" };
+  FM.transfers.set(transfer_id, entry);
+  addTransfer(entry);
+  fmSend({type:"file_download_begin", transfer_id, path: full});
+}
+
+function addTransfer(t){
+  const div = document.createElement("div");
+  div.className="xfer";
+  div.id="xfer-"+t.id;
+  div.innerHTML = `<div class="name">${t.type==="upload"?"↑":"↓"} ${t.name}</div>
+    <div class="xfer-bar"><div class="xfer-fill"></div></div>
+    <div class="meta mono">0%</div>`;
+  elTransferArea.prepend(div);
+}
+function updateTransfer(t){
+  const el = document.getElementById("xfer-"+t.id);
+  if(!el) return;
+  const fill = el.querySelector(".xfer-fill");
+  const meta = el.querySelector(".meta");
+  const done = (t.type==="upload"?t.sent:t.recv) || 0;
+  const total = t.size || 1;
+  const pct = Math.min(100, Math.round(done*100/total));
+  fill.style.width = pct+"%";
+  meta.textContent = pct+"%";
+}
+
+function startUploadFiles(files){
+  const destDir = FM.currentPath || "C:\\";
+  for(const f of files){
+    const id = crypto.randomUUID();
+    const t = {id, name:f.name, size:f.size, sent:0, type:"upload"};
+    FM.transfers.set(id,t);
+    addTransfer(t);
+    fmSend({type:"file_upload_begin", transfer_id:id, name:f.name, size:f.size, dest_dir:destDir});
+    f.arrayBuffer().then(buf=>{
+      const u8 = new Uint8Array(buf);
+      const chunk = 64*1024;
+      let off=0;
+      function b64(slice){
+        let s=""; for(let i=0;i<slice.length;i++) s+=String.fromCharCode(slice[i]);
+        return btoa(s);
+      }
+      (function loop(){
+        if(off >= u8.length){
+          fmSend({type:"file_upload_end", transfer_id:id});
+          return;
+        }
+        const end = Math.min(off+chunk, u8.length);
+        const part = u8.subarray(off,end);
+        off=end; t.sent=end; updateTransfer(t);
+        fmSend({type:"file_upload_chunk", transfer_id:id, data_b64:b64(part)});
+        setTimeout(loop,0);
+      })();
+    });
+  }
+}
+
+elDrive.onchange = () => { listPath(elDrive.value); };
+elSelAll.onchange = () => {
+  if(elSelAll.checked){
+    FM.items.forEach(i=>FM.selection.add(i.full_path));
+  } else FM.selection.clear();
+  renderList();
+};
+elBtnRefresh.onclick = ()=> listPath(FM.currentPath);
+elBtnNewFolder.onclick = ()=> createFolder();
+elBtnDelete.onclick = ()=> confirmDelete();
+elUploadBtn.onclick = ()=> elUploadInput.click();
+elUploadInput.onchange = e=>{
+  const files = [...(e.target.files||[])];
+  if(!files.length) return;
+  startUploadFiles(files);
+  e.target.value="";
+};
+
+document.querySelectorAll(".file-head .hcol").forEach(h=>{
+  h.onclick = ()=>{
+    const f = h.dataset.sort;
+    if(FM.sort.field === f) FM.sort.dir *= -1;
+    else { FM.sort.field = f; FM.sort.dir = 1; }
+    renderList();
+  };
+});
+
+document.addEventListener("keydown", e=>{
+  if(!modal || modal.classList.contains("hidden")) return;
+  if(e.key==="F5"){ e.preventDefault(); listPath(FM.currentPath); }
+  if(e.key==="Backspace"){ e.preventDefault(); goUp(); }
+  if(e.key==="Delete"){ e.preventDefault(); confirmDelete(); }
+  if(e.key==="F2"){ e.preventDefault();
+    if(FM.selection.size===1){
+      startRename([...FM.selection][0]);
+    }
+  }
+});
+
+function goUp(){
+  if(!FM.currentPath) return;
+  let p = FM.currentPath.replace(/[/\\]+$/,'');
+  const idx = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+  if(idx <= 2) {
+    p = p.slice(0, idx+1);
+  } else {
+    p = p.slice(0, idx);
+  }
+  listPath(p);
+}
+
+/* ====== Расширенный протокол сообщений ====== */
+function handleAgentMessage(msg){
+  switch(msg.type){
+    case "file_drives_result":
+      FM.drives = msg.drives || [];
+      renderDrives();
+      if(!FM.currentPath && FM.drives.length){
+        listPath(FM.drives[0].path);
+      }
+      break;
+    case "file_list_adv_result":
+      FM.currentPath = msg.path || FM.currentPath;
+      FM.items = (msg.items||[]).map(it=>{
+        it.full_path = it.full_path || it.path || (FM.currentPath.endsWith("\\")?FM.currentPath:FM.currentPath+"\\")+it.name;
+        it.ext = it.is_dir ? "" : (it.name.split(".").length>1 ? it.name.split(".").pop():"");
+        return it;
+      });
+      FM.selection.forEach(p=>{
+        if(!FM.items.some(i=>i.full_path===p)) FM.selection.delete(p);
+      });
+      buildBreadcrumbs();
+      renderList();
+      break;
+    case "file_mkdir_result":
+    case "file_rename_result":
+    case "file_delete_result":
+      listPath(FM.currentPath);
+      break;
+    case "file_error":
+      alert(msg.message || "Ошибка файла");
+      break;
+    case "file_upload_done": {
+      const t = FM.transfers.get(msg.transfer_id);
+      if(t){ t.sent=t.size; updateTransfer(t); }
+      break;
+    }
+    case "file_download_meta": {
+      const t = FM.transfers.get(msg.transfer_id);
+      if(t){ t.size = msg.size || 0; updateTransfer(t); }
+      break;
+    }
+    case "file_download_chunk": {
+      const t = FM.transfers.get(msg.transfer_id);
+      if(!t) break;
+      const b = atob(msg.data_b64 || "");
+      const arr = new Uint8Array(b.length);
+      for(let i=0;i<b.length;i++) arr[i] = b.charCodeAt(i);
+      t.chunks.push(arr); t.recv += arr.length;
+      updateTransfer(t);
+      break;
+    }
+    case "file_download_end": {
+      const t = FM.transfers.get(msg.transfer_id);
+      if(!t) break;
+      const blob = new Blob(t.chunks,{type:"application/octet-stream"});
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = t.name;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      break;
+    }
+  }
+}
+
+/* Переопределяем глобально если старая функция была */
+window.handleAgentMessage = handleAgentMessage;
+
+/* Инициализация при открытии модала */
+function openFiles(){
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden","false");
+  if(!FM.drives.length) loadDrives(); else listPath(FM.currentPath || FM.drives[0].path);
+}
+function closeFiles(){
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden","true");
 }
 
 function handleAgentMessage(msg){

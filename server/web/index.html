@@ -33,12 +33,14 @@
       <div class="divider"></div>
       <input id="search" class="input" placeholder="Поиск по имени ПК…" oninput="setSearch(this.value)">
       <label class="check">
-        <input type="checkbox" id="only-online" onchange="toggleOnlyOnline(this.checked)">
-        <span>Только онлайн</span>
+        <input type="checkbox" id="show-offline" onchange="toggleShowOffline(this.checked)">
+        <span>Показывать оффлайн</span>
       </label>
+      <span id="refresh-indicator" class="muted" style="font-size:12px;"></span>
     </div>
     <div class="right">
-      <button class="btn" onclick="loadAll()">Обновить</button>
+      <a class="btn" href="/offline">Оффлайн компьютеры</a>
+      <button class="btn" onclick="manualRefresh()">Обновить</button>
     </div>
   </section>
 
@@ -50,13 +52,19 @@
 
     <section class="card content">
       <div class="card-title">Компьютеры</div>
-      <table class="table" id="agents">
+      <table class="table table-agents" id="agents">
+        <colgroup>
+          <col class="c-status">
+          <col class="c-host">
+          <col class="c-group">
+          <col class="c-actions">
+        </colgroup>
         <thead>
           <tr>
             <th>Статус</th>
             <th>Имя ПК</th>
             <th>Группа</th>
-            <th class="actions">Действия</th>
+            <th>Действия</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -65,15 +73,17 @@
 
     <aside class="card info-panel">
       <div class="card-title">Информация</div>
-      <!-- было: <pre id="info" class="info"></pre> -->
       <div id="info" class="info info-view">
         <div class="placeholder">Выберите компьютер, чтобы посмотреть подробности</div>
       </div>
       <div class="assign">
-        <label for="assign-group">Назначить группу:</label>
-        <select id="assign-group" class="input small"></select>
-        <button class="btn btn-primary small" onclick="assignGroup()">Назначить</button>
-        <button class="btn small" onclick="clearGroup()">Удалить из группы</button>
+        <label class="assign-label" for="assign-group">Назначить группу</label>
+        <div class="assign-row">
+          <select id="assign-group" class="input input-select"></select>
+          <button id="assign-apply" class="btn btn-primary btn-sm" onclick="assignGroup()">Назначить</button>
+          <button id="assign-clear" class="btn btn-sm" onclick="clearGroup()">Удалить из группы</button>
+        </div>
+        <div id="assign-status" class="muted assign-status" style="min-height:16px;font-size:12px;"></div>
       </div>
     </aside>
   </section>
@@ -84,247 +94,440 @@
 </footer>
 
 <script>
+/* === Параметры автообновления === */
+const REFRESH_INTERVAL = 8000;
+const PAUSE_ON_INTERACT = 20000;
+
+let refreshTimer = null;
+let pauseTimer = null;
+let lastRefreshOk = true;
+
+const INFO_PLACEHOLDER = '<div class="placeholder">Выберите компьютер, чтобы посмотреть подробности</div>';
+
 const state = {
   groups: [],
   agents: [],
   selectedGroupId: null,
   search: "",
-  onlyOnline: false,
-  currentAgentId: null,
+  showOffline: false,
+  selectedAgentId: null,
+  infoAgentId: null,
+  isPaused: false,
+  groupEditDirty: false        /* пользователь изменил select, но ещё не применил */
 };
 
-async function j(u,o){const r=await fetch(u,o); if(!r.ok) throw new Error(r.status); return r.json();}
-function esc(s){return (s??"").toString().replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
-function g(id){return document.getElementById(id)}
-function N(v){return v===undefined||v===null?"":String(v)}
+function g(id){ return document.getElementById(id); }
+function esc(s){ return (s??"").toString().replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function N(v){ return v==null?"":String(v); }
+async function j(u,o){ const r=await fetch(u,o); if(!r.ok) throw new Error(r.status); return r.json(); }
 
-function setSearch(v){ state.search = (v||"").toLowerCase(); renderAgents(); }
-function toggleOnlyOnline(v){ state.onlyOnline = !!v; renderAgents(); }
-
-function renderCounts(){
-  const total = state.agents.length;
-  const online = state.agents.filter(a=>a.online).length;
-  g("count-total").textContent = total;
-  g("count-online").textContent = online;
+/* === Индикатор === */
+function setRefreshIndicator(text){
+  const el = g("refresh-indicator");
+  if(!el) return;
+  el.textContent = text||"";
 }
 
+/* === Пауза автообновления === */
+function pauseAutoRefresh(ms = PAUSE_ON_INTERACT){
+  state.isPaused = true;
+  setRefreshIndicator("⏸ автообновление");
+  if(pauseTimer) clearTimeout(pauseTimer);
+  pauseTimer = setTimeout(()=>{
+    state.isPaused = false;
+    setRefreshIndicator("");
+  }, ms);
+}
+
+function startPolling(){
+  stopPolling();
+  async function tick(){
+    if(!state.isPaused){
+      try {
+        await loadAgents();
+        lastRefreshOk = true;
+      } catch(e){
+        lastRefreshOk = false;
+        console.warn("refresh error", e);
+        setRefreshIndicator("⚠ ошибка обновления");
+      }
+    }
+    refreshTimer = setTimeout(tick, REFRESH_INTERVAL);
+  }
+  refreshTimer = setTimeout(tick, REFRESH_INTERVAL);
+}
+function stopPolling(){
+  if(refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = null;
+}
+function manualRefresh(){
+  pauseAutoRefresh(5000);
+  loadAgents();
+}
+
+/* === Фильтры === */
+function setSearch(v){
+  state.search = (v||"").toLowerCase();
+  renderAgents();
+  pauseAutoRefresh();
+}
+function toggleShowOffline(v){
+  state.showOffline = !!v;
+  renderAgents();
+  pauseAutoRefresh();
+}
+
+/* === Счётчики === */
+function renderCounts(){
+  g("count-total").textContent = state.agents.length;
+  g("count-online").textContent = state.agents.filter(a=>a.online).length;
+}
+
+/* === Группы === */
 function renderGroups(){
-  const ul = g("groups"); ul.innerHTML = "";
+  const ul = g("groups");
+  ul.innerHTML = "";
   const liAll = document.createElement("li");
-  liAll.className = "group-item" + (state.selectedGroupId===null ? " active" : "");
+  liAll.className = "group-item" + (state.selectedGroupId===null?" active":"");
   liAll.textContent = "Все компьютеры";
-  liAll.onclick = ()=>{ state.selectedGroupId = null; renderGroups(); renderAgents(); };
+  liAll.onclick = ()=>{
+    state.selectedGroupId=null;
+    renderGroups(); renderAgents(); pauseAutoRefresh();
+  };
   ul.appendChild(liAll);
-  for (const grp of state.groups){
+
+  for(const grp of state.groups){
     const li = document.createElement("li");
-    li.className = "group-item" + (state.selectedGroupId===grp.id ? " active" : "");
+    li.className = "group-item" + (state.selectedGroupId===grp.id?" active":"");
     li.textContent = grp.name;
     li.title = `ID: ${grp.id}`;
-    li.onclick = ()=>{ state.selectedGroupId = grp.id; renderGroups(); renderAgents(); };
+    li.onclick = ()=>{
+      state.selectedGroupId = grp.id;
+      renderGroups(); renderAgents(); pauseAutoRefresh();
+    };
     ul.appendChild(li);
   }
+
   const sel = g("assign-group");
-  sel.innerHTML = '<option value="">(нет)</option>' + state.groups.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join("");
+  if(sel){
+    const prevVal = sel.value;
+    sel.innerHTML = '<option value="">(нет)</option>' +
+      state.groups.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join("");
+    if(!state.groupEditDirty) sel.value = prevVal; // не перезатираем, если пользователь редактирует
+  }
+  updateAssignControls();
 }
 
+/* === Строки таблицы === */
 function agentRow(a){
-  const dot = a.online ? '<span class="dot on" title="Онлайн"></span>' : '<span class="dot off" title="Оффлайн"></span>';
+  const selected = state.selectedAgentId===a.agent_id ? " selected":"";
+  const infoActive = state.infoAgentId===a.agent_id ? " btn-active":"";
+  const dot = a.online ? '<span class="dot on" title="Онлайн"></span>' :
+                         '<span class="dot off" title="Оффлайн"></span>';
   const name = esc(a.hostname)||a.agent_id;
   const group = esc(a.group_name)||"-";
-  const viewBtn = a.online ? `<a class="btn btn-primary btn-sm" href="/view/${a.agent_id}">Подключиться</a>` : `<button class="btn btn-sm" disabled>Подключиться</button>`;
-  const unassignBtn = (a.group_id!=null)
-     ? `<button class="btn btn-sm" onclick="event.stopPropagation(); unassignAgent('${a.agent_id}')">Убрать из группы</button>`
-     : "";
-  return `<tr onclick="info('${a.agent_id}')" class="row-link">
+  const viewBtn = a.online
+    ? `<a class="btn btn-primary btn-sm" href="/view/${a.agent_id}" onclick="event.stopPropagation()">Подключиться</a>`
+    : `<button class="btn btn-sm" disabled>Подключиться</button>`;
+  const unBtn = a.group_id!=null
+    ? `<button class="btn btn-sm" onclick="event.stopPropagation(); unassignAgent('${a.agent_id}')">Убрать из группы</button>`
+    : "";
+  return `<tr onclick="selectAgent('${a.agent_id}')" class="row-link${selected}">
     <td class="status">${dot}</td>
-    <td class="host"><div class="host-name">${name}</div><div class="muted">${a.agent_id}</div></td>
+    <td class="host">
+      <div class="host-name">${name}</div>
+      <div class="muted">${a.agent_id}</div>
+    </td>
     <td class="group">${group}</td>
     <td class="actions">
       ${viewBtn}
-      <button class="btn btn-sm" onclick="event.stopPropagation(); info('${a.agent_id}')">Инфо</button>
-      ${unassignBtn}
+      <button class="btn btn-sm${infoActive}" onclick="event.stopPropagation(); toggleInfo('${a.agent_id}')">Инфо</button>
+      ${unBtn}
     </td>
   </tr>`;
 }
 
-// Удаляем оффлайн-дубликаты, если есть онлайн с тем же именем ПК
+/* === Дедупликация оффлайн === */
 function dedupeByHostnamePreferOnline(list){
-  const map = new Map(); // host -> {hasOnline:boolean}
-  for (const a of list){
-    const key = (a.hostname||"").toLowerCase();
-    const cur = map.get(key) || {hasOnline:false};
-    if (a.online) cur.hasOnline = true;
-    map.set(key, cur);
+  const map=new Map();
+  for(const a of list){
+    const k=(a.hostname||"").toLowerCase();
+    const st=map.get(k)||{hasOnline:false};
+    if(a.online) st.hasOnline=true;
+    map.set(k,st);
   }
   return list.filter(a=>{
-    const key = (a.hostname||"").toLowerCase();
-    const hasOnline = map.get(key)?.hasOnline;
-    // если по этому hostname есть онлайн — скрываем оффлайн записи
+    const k=(a.hostname||"").toLowerCase();
+    const hasOnline=map.get(k)?.hasOnline;
     return !(hasOnline && !a.online);
   });
 }
 
+/* === Рендер агентов === */
 function renderAgents(){
-  let list = [...state.agents];
-  if (state.selectedGroupId !== null) list = list.filter(a=>a.group_id===state.selectedGroupId);
-  if (state.onlyOnline) list = list.filter(a=>a.online);
-  if (state.search){
-    const q = state.search;
-    list = list.filter(a=> (a.hostname||"").toLowerCase().includes(q) || (a.agent_id||"").toLowerCase().includes(q) || (a.group_name||"").toLowerCase().includes(q));
+  if(state.selectedAgentId && !state.agents.some(a=>a.agent_id===state.selectedAgentId))
+    state.selectedAgentId=null;
+  if(state.infoAgentId && !state.agents.some(a=>a.agent_id===state.infoAgentId))
+    state.infoAgentId=null;
+
+  let list=[...state.agents];
+  if(state.selectedGroupId!==null) list=list.filter(a=>a.group_id===state.selectedGroupId);
+  if(!state.showOffline) list=list.filter(a=>a.online);
+  if(state.search){
+    const q=state.search;
+    list=list.filter(a=>
+      (a.hostname||"").toLowerCase().includes(q) ||
+      (a.agent_id||"").toLowerCase().includes(q) ||
+      (a.group_name||"").toLowerCase().includes(q)
+    );
   }
-  // скрываем оффлайн-дубликаты при наличии онлайн с тем же hostname
-  list = dedupeByHostnamePreferOnline(list);
-  list.sort((a,b)=> (b.online - a.online) || (a.hostname||"").localeCompare(b.hostname||""));
-  const tb = g("agents").querySelector("tbody");
-  tb.innerHTML = list.map(agentRow).join("");
+  if(state.showOffline) list=dedupeByHostnamePreferOnline(list);
+  list.sort((a,b)=>(b.online-a.online)|| (a.hostname||"").localeCompare(b.hostname||""));
+
+  g("agents").querySelector("tbody").innerHTML = list.map(agentRow).join("");
   renderCounts();
-  // если открыт info по текущему агенту — перерисовать (данные могли обновиться)
-  if (state.currentAgentId){
-    const a = state.agents.find(x=>x.agent_id===state.currentAgentId);
-    if (a) g("info").innerHTML = buildInfoHTML(a);
-  }
+  updateAssignControls();
+  updateInfoPanel();
 }
 
-function pills(items){
-  const arr = Array.isArray(items) ? items : [];
-  if (!arr.length) return '<span class="muted">—</span>';
+/* === Информация === */
+function pills(arr){
+  arr=Array.isArray(arr)?arr:[];
+  if(!arr.length) return '<span class="muted">—</span>';
   return `<div class="pills">${arr.map(x=>`<span class="pill">${esc(x)}</span>`).join("")}</div>`;
 }
-
 function kv(rows){
   return `<dl class="kv">${rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${v||'<span class="muted">—</span>'}</dd>`).join("")}</dl>`;
 }
-
-function section(title, body){
-  return `<div class="section"><h4>${esc(title)}</h4>${body}</div>`;
-}
+function section(t,b){ return `<div class="section"><h4>${esc(t)}</h4>${b}</div>`; }
 
 function buildInfoHTML(a){
   const info = a?.info || {};
   const screen = info.screen || {};
   const hw = info.hardware || {};
-  const cpu = hw.cpu || {};
+  const cpuInfo = hw.cpu || {};          // было cpu
   const sys = hw.system_model || {};
-  const ip = N(info.ip);
-  const mac = N(info.mac);
-  const onlineBadge = a.online ? '<span class="chip chip-on">Онлайн</span>' : '<span class="chip">Оффлайн</span>';
+  const ip = N(info.ip), mac = N(info.mac);
+  const badge = a.online ? '<span class="chip chip-on">Онлайн</span>' : '<span class="chip">Оффлайн</span>';
 
-  const header = `
-    <div class="agent-header">
-      <div class="agent-title">
-        <div class="agent-name">${esc(a.hostname || a.agent_id)}</div>
-        <div class="agent-sub muted">${esc(a.agent_id)}</div>
-      </div>
-      <div class="agent-badges">
-        ${onlineBadge}
-        ${info.admin ? '<span class="chip chip-admin" title="Запущен с правами администратора">Admin</span>' : ''}
-      </div>
+  const header = `<div class="agent-header">
+    <div class="agent-title">
+      <div class="agent-name">${esc(a.hostname||a.agent_id)}</div>
+      <div class="agent-sub muted">${esc(a.agent_id)}</div>
     </div>
-  `;
+    <div class="agent-badges">
+      ${badge}${info.admin?'<span class="chip chip-admin">Admin</span>':""}
+    </div>
+  </div>`;
 
   const general = kv([
     ["Имя ПК", esc(a.hostname||"")],
     ["Пользователь", esc(info.user||"")],
     ["ОС", esc(info.os||"")],
     ["FQDN", esc(info.fqdn||"")],
-    ["Последняя активность", esc(a.last_seen||"")],
+    ["Последняя активность", esc(a.last_seen||"")]
   ]);
 
   const network = kv([
-    ["Основной IP", ip ? `<span class="mono">${esc(ip)}</span>` : ""],
+    ["Основной IP", ip?`<span class="mono">${esc(ip)}</span>`:""],
     ["Все IP", pills(info.ips||[])],
-    ["Основной MAC", mac ? `<span class="mono">${esc(mac)}</span>` : ""],
-    ["Все MAC", pills(info.macs||[])],
+    ["Основной MAC", mac?`<span class="mono">${esc(mac)}</span>`:""],
+    ["Все MAC", pills(info.macs||[])]
   ]);
 
   const screenSec = kv([
-    ["Разрешение", (screen.width && screen.height) ? `<span class="mono">${screen.width} × ${screen.height}</span>` : ""],
+    ["Разрешение",(screen.width&&screen.height)?`<span class="mono">${screen.width} × ${screen.height}</span>`:""]
   ]);
 
   const cpuLine = [
-    esc(cpu.model||""),
-    (cpu.cores_physical||cpu.cores_logical) ? `, ядра: ${cpu.cores_physical||"-"}/${cpu.cores_logical||"-"}` : "",
-    cpu.freq_mhz ? `, ${cpu.freq_mhz} МГц` : ""
+    esc(cpuInfo.model||""),
+    (cpuInfo.cores_physical||cpuInfo.cores_logical)?`, ядра: ${cpuInfo.cores_physical||"-"} / ${cpuInfo.cores_logical||"-"}`:"",
+    cpuInfo.freq_mhz?`, ${cpuInfo.freq_mhz} МГц`:""
   ].join("");
+
   const hardware = kv([
-    ["CPU", cpuLine || ""],
-    ["RAM", (hw.ram_gb ? `<span class="mono">${hw.ram_gb} ГБ</span>` : "")],
-    ["Архитектура", esc(hw.machine||"")],
-    ["Система", (sys.manufacturer||sys.product_name) ? esc(`${sys.manufacturer||""} ${sys.product_name||""}`.trim()) : ""],
+    ["CPU", cpuLine||""],
+    ["RAM", hw.ram_gb?`<span class="mono">${hw.ram_gb} ГБ</span>`:""],
+    ["Система",(sys.manufacturer||sys.product_name)?esc(`${sys.manufacturer||""} ${sys.product_name||""}`.trim()):""]
   ]);
 
-  return `
-    ${header}
-    ${section("Общее", general)}
-    ${section("Сеть", network)}
-    ${section("Экран", screenSec)}
-    ${section("Железо", hardware)}
-  `;
+  return header + section("Общее", general) + section("Сеть", network) +
+         section("Экран", screenSec) + section("Железо", hardware);
+}
+function updateInfoPanel(){
+  const box=g("info");
+  if(!box) return;
+  if(!state.infoAgentId){ box.innerHTML=INFO_PLACEHOLDER; return; }
+  const agent=state.agents.find(a=>a.agent_id===state.infoAgentId);
+  if(!agent){ state.infoAgentId=null; box.innerHTML=INFO_PLACEHOLDER; return; }
+  box.innerHTML=buildInfoHTML(agent);
 }
 
-async function loadGroups(){
-  const data = await j("/api/groups");
-  state.groups = data.groups || [];
-  renderGroups();
+/* === Выбор === */
+function selectAgent(id){
+  state.selectedAgentId = state.selectedAgentId===id?null:id;
+  if(state.selectedAgentId) pauseAutoRefresh();
+  state.groupEditDirty=false;   // сбрасываем несохранённый выбор
+  renderAgents();
 }
-
-async function loadAgents(){
-  const data = await j("/api/agents");
-  state.agents = data.agents || [];
+function toggleInfo(id){
+  state.infoAgentId = state.infoAgentId===id?null:id;
+  if(state.infoAgentId) pauseAutoRefresh();
   renderAgents();
 }
 
-async function loadAll(){ await Promise.all([loadGroups(), loadAgents()]); }
+/* === Назначение группы === */
+function updateAssignControls(){
+  const select=g("assign-group");
+  const apply =g("assign-apply");
+  const clear =g("assign-clear");
+  const agent =state.selectedAgentId?state.agents.find(a=>a.agent_id===state.selectedAgentId):null;
 
+  if(select){
+    if(!agent){
+      if(!state.groupEditDirty) select.value="";
+      select.disabled=true;
+    } else {
+      select.disabled=false;
+      if(!state.groupEditDirty){
+        if(agent.group_id!=null) select.value=String(agent.group_id);
+        else select.value="";
+      }
+    }
+  }
+  if(apply){
+    const selVal = select?select.value:"";
+    const same = !agent || (agent.group_id==null && selVal==="") ||
+                 (agent && agent.group_id!=null && selVal===String(agent.group_id));
+    apply.disabled = !agent || same;
+  }
+  if(clear){
+    clear.disabled = !agent || !agent.group_id;
+  }
+}
+
+async function assignGroup(){
+  const id=state.selectedAgentId;
+  if(!id) return;
+  const select=g("assign-group");
+  const apply =g("assign-apply");
+  const clear =g("assign-clear");
+  const status=g("assign-status");
+  const val=select.value;
+  const gid=val?Number(val):null;
+  const agent=state.agents.find(a=>a.agent_id===id);
+
+  if(agent && ((agent.group_id==null && gid==null) || agent.group_id===gid)){
+    status.textContent="Нет изменений";
+    setTimeout(()=>{ if(status.textContent==="Нет изменений") status.textContent=""; },1600);
+    return;
+  }
+
+  pauseAutoRefresh(12000);
+  select.disabled=true; apply.disabled=true; clear.disabled=true;
+  status.textContent="Сохранение...";
+
+  try{
+    await j(`/api/agents/${encodeURIComponent(id)}/assign_group`,{
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ group_id: gid })
+    });
+    if(agent){
+      agent.group_id = gid;
+      agent.group_name = gid==null? null : (state.groups.find(g=>g.id===gid)?.name || null);
+    }
+    state.groupEditDirty=false;
+    renderAgents();
+    status.textContent="Группа обновлена";
+  }catch(e){
+    console.error(e);
+    status.textContent="Ошибка";
+  }finally{
+    setTimeout(()=>{ status.textContent=""; },2200);
+    select.disabled=false;
+    updateAssignControls();
+  }
+}
+
+async function clearGroup(){
+  if(!state.selectedAgentId) return;
+  const select=g("assign-group");
+  select.value="";
+  state.groupEditDirty=true;
+  await assignGroup();
+}
+
+async function unassignAgent(id){
+  pauseAutoRefresh();
+  await j(`/api/agents/${encodeURIComponent(id)}/assign_group`,{
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify({ group_id: null })
+  });
+  await loadAgents();
+  if(state.selectedAgentId===id){
+    const agent=state.agents.find(a=>a.agent_id===id);
+    if(agent) agent.group_id=null;
+    state.groupEditDirty=false;
+    updateAssignControls();
+  }
+}
+
+/* === CRUD групп === */
 async function createGroup(){
-  const name = g("gname").value.trim();
+  const name=g("gname").value.trim();
   if(!name) return false;
-  await j("/api/groups", {method:"POST", headers:{'Content-Type':'application/json'}, body: JSON.stringify({name})});
-  g("gname").value = "";
+  await j("/api/groups",{
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify({ name })
+  });
+  g("gname").value="";
   await loadGroups();
   return false;
 }
 
-async function info(agent_id){
-  const a = state.agents.find(x=>x.agent_id===agent_id);
-  state.currentAgentId = agent_id;
-  g("info").innerHTML = a ? buildInfoHTML(a) : '<div class="placeholder">Нет данных</div>';
-  const sel = g("assign-group");
-  sel.value = (a && a.group_id!=null) ? String(a.group_id) : "";
+/* === Загрузка === */
+async function loadGroups(){
+  const data=await j("/api/groups");
+  state.groups=data.groups||[];
+  renderGroups();
+}
+async function loadAgents(){
+  const data=await j("/api/agents");
+  state.agents=data.agents||[];
+  renderAgents();
+}
+async function loadAll(){
+  await Promise.all([loadGroups(), loadAgents()]);
 }
 
-async function assignGroup(){
-  const id = state.currentAgentId;
-  if(!id) return;
-  const val = g("assign-group").value;
-  const gid = val ? Number(val) : null;
-  await j(`/api/agents/${encodeURIComponent(id)}/assign_group`, {
-    method:"POST", headers:{'Content-Type':'application/json'}, body: JSON.stringify({group_id: gid})
-  });
-  await loadAgents();
-  info(id);
-}
-
-async function clearGroup(){
-  const id = state.currentAgentId;
-  if(!id) return;
-  await unassignAgent(id);
-}
-
-async function unassignAgent(agent_id){
-  await j(`/api/agents/${encodeURIComponent(agent_id)}/assign_group`, {
-    method:"POST",
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({group_id: null})
-  });
-  await loadAgents();
-  if (state.currentAgentId === agent_id){
-    const sel = g("assign-group");
-    if (sel) sel.value = "";
-    info(agent_id);
+/* === Init === */
+document.addEventListener("DOMContentLoaded", ()=>{
+  g("show-offline").checked=state.showOffline;
+  const sel=g("assign-group");
+  if(sel){
+    sel.addEventListener("focus", ()=>{
+      state.groupEditDirty=false;
+      pauseAutoRefresh();
+    });
+    sel.addEventListener("change", ()=>{
+      state.groupEditDirty=true;         // пользователь начал редактирование
+      pauseAutoRefresh();
+      updateAssignControls();
+    });
+    sel.addEventListener("blur", ()=>{
+      // если пользователь ушёл и не применил — через паузу откатим
+      setTimeout(()=>{
+        if(state.groupEditDirty){
+          // не сохраняем, просто оставляем выбор (не перезатираем)
+        }
+      },300);
+    });
   }
-}
+  loadAll().then(startPolling);
+});
 
-setInterval(loadAgents, 3000);
-loadAll();
+/* Удаляем прежний setInterval — не нужен */
 </script>

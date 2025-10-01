@@ -1,0 +1,256 @@
+<!doctype html>
+<meta charset="utf-8"/>
+<title>Remote PC Control — Оффлайн компьютеры</title>
+<link rel="stylesheet" href="/static/styles.css">
+
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">🖥️</div>
+    <div class="title">
+      <h1>Remote PC Control</h1>
+      <div class="subtitle">Оффлайн компьютеры</div>
+    </div>
+  </div>
+  <div class="stats">
+    <div class="stat">
+      <span class="label">Оффлайн</span>
+      <span class="value" id="count-offline">0</span>
+    </div>
+    <div class="stat">
+      <span class="label">Всего</span>
+      <span class="value" id="count-total">0</span>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+  <section class="toolbar card">
+    <div class="left">
+      <a class="btn" href="/">← Назад</a>
+      <div class="divider"></div>
+      <div class="search-wrapper">
+        <input id="search" class="input" placeholder="Поиск…" oninput="setSearch(this.value)">
+      </div>
+    </div>
+    <div class="right">
+      <button class="btn" onclick="loadAgents()">Обновить</button>
+    </div>
+  </section>
+
+  <section class="grid-offline">
+    <section class="card content offline-list">
+      <div class="card-title">Список оффлайн ПК</div>
+      <table class="table table-offline" id="agents-offline">
+        <colgroup>
+          <col class="c-host">
+          <col class="c-group">
+          <col class="c-last">
+          <col class="c-actions">
+        </colgroup>
+        <thead>
+          <tr>
+            <th>Имя ПК</th>
+            <th>Группа</th>
+            <th>Последняя активность</th>
+            <th>Действия</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+    <aside class="card info-panel">
+      <div class="card-title">Информация</div>
+      <div id="info" class="info info-view">
+        <div class="placeholder">Выберите компьютер, чтобы посмотреть подробности</div>
+      </div>
+    </aside>
+  </section>
+
+<footer class="footer">
+  <div>© Remote PC Control</div>
+</footer>
+
+<script>
+const INFO_PLACEHOLDER = '<div class="placeholder">Выберите компьютер, чтобы посмотреть подробности</div>';
+
+const state = {
+  agents: [],
+  search: "",
+  selectedAgentId: null,
+  infoAgentId: null,
+};
+
+async function j(u,o){const r=await fetch(u,o);if(!r.ok)throw new Error(r.status);return r.json();}
+function esc(s){return (s??"").toString().replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+function g(id){return document.getElementById(id);}
+function N(v){return v==null?"":String(v);}
+
+function parseLastSeen(v){
+  if(!v)return 0;
+  const iso = `${v.replace(" ","T")}Z`;
+  const ts = Date.parse(iso);
+  return Number.isNaN(ts)?0:ts;
+}
+
+function dedupeOffline(list){
+  const map=new Map();
+  for(const it of list){
+    if(it.online) continue;
+    const key=(it.hostname||it.agent_id||"").toLowerCase();
+    const ts=parseLastSeen(it.last_seen);
+    const saved=map.get(key);
+    if(!saved||ts>saved.ts) map.set(key,{item:it,ts});
+  }
+  return [...map.values()].map(x=>x.item);
+}
+
+function pills(items){
+  const arr=Array.isArray(items)?items:[];
+  if(!arr.length) return '<span class="muted">—</span>';
+  return `<div class="pills">${arr.map(x=>`<span class="pill">${esc(x)}</span>`).join("")}</div>`;
+}
+function kv(rows){
+  return `<dl class="kv">${rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${v||'<span class="muted">—</span>'}</dd>`).join("")}</dl>`;
+}
+function section(t,b){return `<div class="section"><h4>${esc(t)}</h4>${b}</div>`;}
+
+function buildInfoHTML(a){
+  const info=a?.info||{};
+  const screen=info.screen||{};
+  const hw=info.hardware||{};
+  const cpu=hw.cpu||{};
+  const sys=hw.system_model||{};
+  const ip=N(info.ip);
+  const mac=N(info.mac);
+  const badge='<span class="chip">Оффлайн</span>';
+
+  const header=`
+    <div class="agent-header">
+      <div class="agent-title">
+        <div class="agent-name">${esc(a.hostname||a.agent_id)}</div>
+        <div class="agent-sub muted">${esc(a.agent_id)}</div>
+      </div>
+      <div class="agent-badges">
+        ${badge}
+        ${info.admin?'<span class="chip chip-admin">Admin</span>':""}
+      </div>
+    </div>
+  `;
+
+  const general=kv([
+    ["Имя ПК",esc(a.hostname||"")],
+    ["Пользователь",esc(info.user||"")],
+    ["ОС",esc(info.os||"")],
+    ["FQDN",esc(info.fqdn||"")],
+    ["Последняя активность",esc(a.last_seen||"")]
+  ]);
+
+  const network=kv([
+    ["Основной IP",ip?`<span class="mono">${esc(ip)}</span>`:""],
+    ["Все IP",pills(info.ips||[])],
+    ["Основной MAC",mac?`<span class="mono">${esc(mac)}</span>`:""],
+    ["Все MAC",pills(info.macs||[])]
+  ]);
+
+  const screenSec=kv([
+    ["Разрешение",(screen.width&&screen.height)?`<span class="mono">${screen.width} × ${screen.height}</span>`:""]
+  ]);
+
+  const cpuLine=[
+    esc(cpu.model||""),
+    (cpu.cores_physical||cpu.cores_logical)?`, ядра: ${cpu.cores_physical||"-"} / ${cpu.cores_logical||"-"}`:"",
+    cpu.freq_mhz?`, ${cpu.freq_mhz} МГц`:""
+  ].join("");
+
+  const hardware=kv([
+    ["CPU",cpuLine||""],
+    ["RAM",hw.ram_gb?`<span class="mono">${hw.ram_gb} ГБ</span>`:""],
+    ["Архитектура",esc(hw.machine||"")],
+    ["Система",(sys.manufacturer||sys.product_name)?esc(`${sys.manufacturer||""} ${sys.product_name||""}`.trim()):""]
+  ]);
+
+  return `${header}${section("Общее",general)}${section("Сеть",network)}${section("Экран",screenSec)}${section("Железо",hardware)}`;
+}
+
+function setSearch(v){
+  state.search=(v||"").toLowerCase();
+  renderAgents();
+}
+
+function agentRow(a){
+  const selected=state.selectedAgentId===a.agent_id?" selected":"";
+  const infoActive=state.infoAgentId===a.agent_id?" btn-active":"";
+  const name=esc(a.hostname)||a.agent_id;
+  const group=esc(a.group_name)||"-";
+  const lastSeen=esc(a.last_seen||"");
+  return `<tr onclick="selectAgent('${a.agent_id}')" class="row-link${selected}">
+    <td class="host">
+      <div class="host-name">${name}</div>
+      <div class="muted mono-small">${a.agent_id}</div>
+    </td>
+    <td class="group">${group}</td>
+    <td class="last">${lastSeen||'<span class="muted">—</span>'}</td>
+    <td class="actions">
+      <button class="btn btn-sm${infoActive}" onclick="event.stopPropagation(); toggleInfo('${a.agent_id}')">Инфо</button>
+    </td>
+  </tr>`;
+}
+
+function renderAgents(){
+  if(state.selectedAgentId && !state.agents.some(a=>a.agent_id===state.selectedAgentId)) state.selectedAgentId=null;
+  if(state.infoAgentId && !state.agents.some(a=>a.agent_id===state.infoAgentId)) state.infoAgentId=null;
+
+  let list=dedupeOffline(state.agents).filter(a=>!a.online);
+  if(state.search){
+    const q=state.search;
+    list=list.filter(a=>
+      (a.hostname||"").toLowerCase().includes(q) ||
+      (a.agent_id||"").toLowerCase().includes(q) ||
+      (a.group_name||"").toLowerCase().includes(q)
+    );
+  }
+  list.sort((a,b)=>parseLastSeen(b.last_seen)-parseLastSeen(a.last_seen));
+
+  g("agents-offline").querySelector("tbody").innerHTML =
+    list.length?list.map(agentRow).join(""):'<tr><td colspan="4" class="muted">Нет оффлайн компьютеров</td></tr>';
+
+  g("count-offline").textContent=list.length;
+  g("count-total").textContent=state.agents.length;
+  updateInfoPanel();
+}
+
+function updateInfoPanel(){
+  const box=g("info");
+  if(!box) return;
+  if(!state.infoAgentId){
+    box.innerHTML=INFO_PLACEHOLDER;
+    return;
+  }
+  const agent=state.agents.find(a=>a.agent_id===state.infoAgentId);
+  if(!agent){
+    state.infoAgentId=null;
+    box.innerHTML=INFO_PLACEHOLDER;
+    return;
+  }
+  box.innerHTML=buildInfoHTML(agent);
+}
+
+function selectAgent(id){
+  state.selectedAgentId = state.selectedAgentId===id?null:id;
+  renderAgents();
+}
+
+function toggleInfo(id){
+  state.infoAgentId = state.infoAgentId===id?null:id;
+  renderAgents();
+}
+
+async function loadAgents(){
+  const data=await j("/api/agents");
+  state.agents=data.agents||[];
+  renderAgents();
+}
+
+setInterval(loadAgents,5000);
+loadAgents();
+</script>

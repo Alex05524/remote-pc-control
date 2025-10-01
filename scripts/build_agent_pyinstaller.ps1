@@ -9,8 +9,8 @@ $webDir  = Join-Path $root "server\web\agent"
 python -m pip install --upgrade pip
 python -m pip install --upgrade pyinstaller
 
-# Удаляем конфликтующий бэкпорт pathlib (если установлен)
-python -m pip uninstall -y pathlib 2>$null | Out-Null
+# # Удаляем конфликтующий бэкпорт pathlib (если установлен)
+# python -m pip uninstall -y pathlib 2>$null | Out-Null
 
 # Чистка
 if (Test-Path $workDir) { Remove-Item -Recurse -Force $workDir }
