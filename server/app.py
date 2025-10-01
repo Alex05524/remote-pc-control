@@ -477,12 +477,12 @@ Invoke-WebRequest -Uri "{download_url}" -OutFile $exe
 
 Write-Host "Настраиваю переменные окружения..." -ForegroundColor Cyan
 setx SHARED_SECRET "{secret}" | Out-Null
-setx AGENT_SERVER "ws://localhost:8765/ws/agent" | Out-Null
+setx AGENT_SERVER "{ws_uri}" | Out-Null
 {"setx AGENT_TLS_INSECURE \"1\" | Out-Null" if tls_insecure else ""}
 
 Write-Host "Запускаю агента..." -ForegroundColor Cyan
 Start-Process -FilePath $exe
-Write-Host "Готово. Агент подключится к ws://localhost:8765/ws/agent" -ForegroundColor Green
+Write-Host "Готово. Агент подключится к {ws_uri}" -ForegroundColor Green
 """
     return PlainTextResponse(ps, media_type="text/plain; charset=utf-8")
 
