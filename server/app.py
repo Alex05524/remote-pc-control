@@ -650,7 +650,6 @@ async def ws_view(ws: WebSocket, agent_id: str):
             if len(raw) > settings.MAX_VIEWER_TEXT_SIZE:
                 continue
 
-            # Пытаемся разобрать JSON
             data = None
             try:
                 data = json.loads(raw)
@@ -660,28 +659,23 @@ async def ws_view(ws: WebSocket, agent_id: str):
             ag_meta = active_agents.get(agent_id) or {}
             agent_ws: WebSocket | None = ag_meta.get("ws")
 
-            # Если это одна из команд файлового менеджера — отправляем строго как JSON
             if data and isinstance(data, dict):
                 mtype = data.get("type")
-                if mtype in {"file_drives", "file_list_adv", "file_mkdir", "file_rename", "file_delete"}:
+                # все команды продвинутого файлового менеджера
+                if mtype in ALLOWED_FILE_TYPES:
                     if agent_ws:
                         await agent_ws.send_json(data)
                     continue
-                # Иначе просто транзит
+                # остальное транзитом
                 if agent_ws:
                     await agent_ws.send_text(raw)
             else:
-                # Неформатированный текст — прямой транзит
                 if agent_ws:
                     await agent_ws.send_text(raw)
-
     except WebSocketDisconnect:
         pass
     finally:
-        try:
-            viewers.get(agent_id, set()).discard(ws)
-        except Exception:
-            pass
+        viewers.get(agent_id, set()).discard(ws)
 
 # ================== Глобальный обработчик ошибок ==================
 
